@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 use strict;
 use warnings;
@@ -288,7 +288,10 @@ sub _master_ctl {
 sub system {
     my $self = shift;
     $self->_check_and_clear_error or return -1;
-    my @call = $self->_make_call(@_);
+    my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
+    my $pty = delete $opts{pty};
+    _croak_bad_options %opts;
+    my @call = $self->_make_call_ex(($pty ? ['-qt'] : []), @_);
     $debug and $debug & 16 and _debug "system @call";
     CORE::system @call;
 }
@@ -325,17 +328,31 @@ sub open_ex {
         delete @opts{qw(stdin stdout stderr pty stderr_to_stdout)};
     _croak_bad_options %opts;
 
-    my ($rin, $win, $rout, $wout, $rerr, $werr, $mpty, @t);
+    my ($rin, $win, $rout, $wout, $rerr, $werr, @t);
     if ($pty) {
         _load_module('IO::Pty');
-        $mpty = IO::Pty->new;
         push @t, '-t';
     }
     if ($stdin) {
-        ($rin, $win) = $self->_make_pipe or return;
+        if ($pty) {
+            $win = IO::Pty->new;
+            $rin = $win->slave;
+        }
+        else {
+            ($rin, $win) = $self->_make_pipe or return;
+        }
     }
     if ($stdout) {
-        ($rout, $wout) = $self->_make_pipe or return;
+        if ($pty and $stdin) {
+            $wout = $rin;
+            unless (open $rout, '<&', $win) {
+                $self->_set_error(OSSH_PIPE_FAILED, "unable to dup master pty");
+                return;
+            }
+        }
+        else {
+            ($rout, $wout) = $self->_make_pipe or return;
+        }
     }
     if ($stderr) {
         ($rerr, $werr) = $self->_make_pipe or return;
@@ -347,10 +364,8 @@ sub open_ex {
         return undef;
     }
     unless ($pid) {
-        if (defined $mpty) {
-            $mpty->make_slave_controlling_terminal;
-        }
         if (defined $rin) {
+            $rin->make_slave_controlling_terminal if $pty;
             open STDIN, '<&', $rin or POSIX::_exit(255);
             close $win;
         }
@@ -370,8 +385,8 @@ sub open_ex {
         do { exec @call };
         POSIX::_exit(255);
     }
-    $mpty->close_slave() if defined $mpty;
-    wantarray ? ($win, $rout, $rerr, $mpty, $pid) : $pid;
+    $win->close_slave() if ($pty and defined $win);
+    wantarray ? ($win, $rout, $rerr, $pid) : $pid;
 }
 
 sub pipe_in {
@@ -496,7 +511,7 @@ sub open2 {
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     _croak_bad_options %opts, %open2_good;
 
-    my ($in, $out, undef, undef, $pid) =
+    my ($in, $out, undef, $pid) =
         $self->open_ex({ stdout => 1,
                          stdin => 1,
                          %opts }, @_) or return ();
@@ -508,12 +523,12 @@ sub open2pty {
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     _croak_bad_options %opts, %open2_good;
 
-    my ($in, $out, undef, $pty, $pid) =
+    my ($in, $out, undef, $pid) =
         $self->open_ex({ stdout => 1,
                          stdin => 1,
                          pty => 1,
                          %opts }, @_) or return ();
-    return ($in, $out, $pty, $pid);
+    return ($in, $out, $pid);
 }
 
 sub open3 {
@@ -521,7 +536,7 @@ sub open3 {
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     _croak_bad_options %opts;
 
-    my ($in, $out, $err, undef, $pid) =
+    my ($in, $out, $err, $pid) =
         $self->open_ex({ stdout => 1,
                          stdin => 1,
                          stderr => 1 },
@@ -534,13 +549,13 @@ sub open3pty {
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     _croak_bad_options %opts;
 
-    my ($in, $out, $err, $pty, $pid) =
+    my ($in, $out, $err, $pid) =
         $self->open_ex({ stdout => 1,
                          stdin => 1,
                          stderr => 1,
                          pty => 1 },
                        @_) or return ();
-    return ($in, $out, $err, $pty, $pid);
+    return ($in, $out, $err, $pid);
 }
 
 sub capture {
@@ -550,7 +565,7 @@ sub capture {
     my $input_data = delete $opts{input_data};
     _croak_bad_options %opts, %open2_good;
 
-    my ($in, $out, undef, undef, $pid) =
+    my ($in, $out, undef, $pid) =
         $self->open_ex({ stdout => 1,
                          stdin => (defined $input_data ? 1 : undef),
                          %opts }, @_) or return ();
@@ -568,7 +583,7 @@ sub capture2 {
     my $input_data = delete $opts{input_data};
     _croak_bad_options %opts;
 
-    my ($in, $out, $err, undef, $pid) = 
+    my ($in, $out, $err, $pid) =
         $self->open_ex( { stdin => (defined $input_data ? 1 : undef),
                           stdout => 1,
                           stderr => 1,
@@ -807,8 +822,7 @@ L<Net::OpenSSH::Constants>).
 =item $ssh->system(@cmd)
 
 Similar to C<system> builtin, runs the command C<@cmd> on the remote
-machine using the current stdin, stdout, stderr and pty streams for
-IO.
+machine using the current stdin, stdout and stderr streams for IO.
 
 Example:
 
@@ -817,14 +831,14 @@ Example:
 The value returned also follows the C<system> builtin convention (see
 L<perlvar/"$?">).
 
-=item ($in, $out, $err, $pty, $pid) = $ssh->open_ex(\%opts, @cmd)
+=item ($in, $out, $err, $pid) = $ssh->open_ex(\%opts, @cmd)
 
 That method starts the command C<@cmd> on the remote machine creating
 new pipes for the IO channels as specified on the C<%opts> hash.
 
-Returns five values, the first four correspond to the local side of
-the pipes created (they can be undef) and the last to the PID of the
-new SSH slave process.
+Returns fivefour values, the first three correspond to the local side
+of the pipes created (they can be undef) and the fourth to the PID of
+the new SSH slave process.
 
 Note that C<waitpid> has to be used afterwards to reap the
 slave SSH process.
@@ -839,6 +853,13 @@ The accepted options are:
 
 creates a new pipe for stdin
 
+=item pty => $bool
+
+If C<stdin> is also specified, instead of a regular pipe a pty is
+used. If C<stdout> is requested it is also attached to the pty.
+
+Otherwise, the tty for the current process is forwarded.
+
 =item stdout => $bool
 
 creates a new pipe for stdout
@@ -851,16 +872,12 @@ creates a new pipe for stderr
 
 makes stderr point to stdout
 
-=item pty => $bool
-
-allocates a new pty for the process (see L<IO::Pty>).
-
 =back
 
 Usage example:
 
   # similar to IPC::Open2 open2 function:
-  my ($in, $out, undef, undef, $pid) = 
+  my ($in, $out, undef, $pid) = 
       $ssh->open_ex( { stdin => 1,
                        stdout => 1 },
                      @cmd )
@@ -871,7 +888,7 @@ Usage example:
 
 =item ($in, $pid) = $ssh->pipe_in(\%opts, @cmd)
 
-this method is similar to the following Perl open C<open> call
+this method is similar to the following Perl C<open> call
 
   $pid = open $in, '|-', @cmd
 
@@ -901,11 +918,11 @@ Currently no options are accepted.
 
 =item ($in, $out, $pid) = $ssh->open2(\%opts, @cmd)
 
-=item ($in, $out, $pty, $pid) = $ssh->open2pty(\%opts, @cmd)
+=item ($in, $out, $pid) = $ssh->open2pty(\%opts, @cmd)
 
 =item ($in, $out, $err, $pid) = $ssh->open3(\%opts, @cmd)
 
-=item ($in, $out, $err, $pty, $pid) = $ssh->open3pty(\%opts, @cmd)
+=item ($in, $out, $err, $pid) = $ssh->open3pty(\%opts, @cmd)
 
 shortuts around C<open_ex> method.
 
