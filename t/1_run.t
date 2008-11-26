@@ -17,7 +17,7 @@ plan skip_all => 'OpenSSH 4.1 or later required'
 chomp $ver;
 diag "SSH client found: $ver\n";
 
-my $ssh = Net::OpenSSH->new('localhost', timeout => 60);
+my $ssh = Net::OpenSSH->new('localhost', timeout => 60, strict_mode => 0);
 
 plan skip_all => 'Unable to establish SSH connection to localhost'
     if $ssh->error;

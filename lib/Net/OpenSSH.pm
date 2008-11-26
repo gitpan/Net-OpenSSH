@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 use strict;
 use warnings;
@@ -87,6 +87,7 @@ sub new {
     my $ssh_cmd = delete $opts{ssh_cmd};
     $ssh_cmd = 'ssh' unless defined $ssh_cmd;
     my $timeout = delete $opts{timeout};
+    my $strict_mode = delete $opts{strict_mode};
     _croak_bad_options %opts;
 
     my @cmd_opts;
@@ -127,12 +128,13 @@ sub new {
             return undef;
         }
     }
-    $ctl_dir = File::Spec->catdir((File::Spec->splitpath($ctl_path))[0,1]);
+    $ctl_dir = File::Spec->catpath((File::Spec->splitpath($ctl_path))[0,1], "");
     $debug and $debug & 2 and _debug "ctl_path: $ctl_path, ctl_dir: $ctl_dir";
 
-    unless ($self->_is_secure_path($ctl_dir)) {
-        $self->_set_error(OSSH_MASTER_FAILED, "ctl_dir $ctl_dir is not secure");
-        return $self;
+    if (!defined $strict_mode or $strict_mode and
+	!$self->_is_secure_path($ctl_dir)) {
+	$self->_set_error(OSSH_MASTER_FAILED, "ctl_dir $ctl_dir is not secure");
+	return $self;
     }
 
     $self->{_ctl_path} = $ctl_path;
@@ -604,8 +606,10 @@ sub DESTROY {
     my $self = shift;
     my $pid = $self->{_pid};
     $debug and $debug & 2 and _debug("DESTROY($self, pid => ".(defined $pid ? $pid : undef).")");
-    $self->_master_ctl('exit') if defined $pid;
-    waitpid($pid, 0);
+    if ($pid) {
+	$self->_master_ctl('exit');
+	waitpid($pid, 0);
+    }
 }
 
 1;
@@ -704,9 +708,10 @@ Being based on OpenSSH is also an advantage in several ways as a
 proved, stable, secure (to paranoic levels), interoperable and well
 maintained implementation of the SSH protocol is used.
 
-On the other hand, Net::OpenSSH will not run on Windows (well, maybe
-under the perl that comes with Cygwin... tell me if you try it,
-please!)
+On the other hand, Net::OpenSSH does not work on Windows (OpenSSH
+connection multiplexing feature is not supported there due to Windows
+not implementing file descriptor passing between processes through
+sockets).
 
 Net::OpenSSH specifically requires OpenSSH SSH client (AFAIK, the
 multiplexing feature is not available from any other SSH
@@ -1025,9 +1030,8 @@ This is a very early release, expect lots of bugs. Also the API is
 provisional and will be changed as required in order to improve the
 module.
 
-Does not work on Windows. I don't believe that could be done without
-becoming insane on the process, though, patches are very
-welcome!
+Does not work on Windows due to limitations on that "Operative
+System".
 
 Doesn't work on VMS either... well, actually, it probably doesn't work
 on anything not resembling a modern Linux/Unix OS.
