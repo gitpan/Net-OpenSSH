@@ -15,14 +15,14 @@ plan skip_all => 'OpenSSH 4.1 or later required'
     unless (defined $num and $num >= 4.1);
 
 chomp $ver;
-diag "SSH client found: $ver\n";
+diag "\nSSH client found: $ver\nTrying to connect to localhost, timeout is 30s.\n";
 
-my $ssh = Net::OpenSSH->new('localhost', timeout => 60, strict_mode => 0);
+my $ssh = Net::OpenSSH->new('localhost', timeout => 30);
 
 plan skip_all => 'Unable to establish SSH connection to localhost'
     if $ssh->error;
 
-plan tests => 13;
+plan tests => 15;
 
 sub shell_quote {
     my $txt = shift;
@@ -58,9 +58,18 @@ my ($output, $errput) = $ssh->capture2("cat $sq_cwd/test.dat");
 is($errput, '', "errput");
 is($output, $lines, "output") or diag $output;
 
-$output = $ssh->capture({input_data => \@lines}, "cat");
+$output = $ssh->capture({stdin_data => \@lines}, "cat");
 is ($output, $lines);
 
 ($output, $errput) = $ssh->capture2("cat $sq_cwd/test.dat 1>&2");
 is ($errput, $lines);
 is ($output, '');
+
+my $string = q(#@$#$%&(@#_)erkljgfd'' 345345' { { / // ///foo);
+
+$output = $ssh->capture(echo => $string);
+chomp $output;
+is ($output, $string, "quote_args");
+
+eval { $ssh->capture({foo => 1}, 'bar') };
+ok($@ =~ /option/ and $@ =~ /foo/);

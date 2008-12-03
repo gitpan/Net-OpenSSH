@@ -1,5 +1,14 @@
 Revision history for Perl extension Net::OpenSSH.
 
+
+0.06  Dec 3, 2008
+        - open_ex API redesigned
+        - better bad options handling
+        - support for async connections
+        - shell metacharacter quoting
+        - improved debugging
+        - improved documentation
+
 0.01  Fri Nov 14 01:02:40 2008
 	- original version; created by h2xs 1.23 with options
 		-AXn Net::OpenSSH
