@@ -33,8 +33,8 @@ sub shell_quote {
 my $cwd = cwd;
 my $sq_cwd = shell_quote $cwd;
 
-my @ls_good= `ls $sq_cwd`;
-my @ls = $ssh->capture({stderr_to_stdout => 1}, "ls $sq_cwd");
+my @ls_good= sort `ls $sq_cwd`;
+my @ls = sort $ssh->capture({stderr_to_stdout => 1}, "ls $sq_cwd");
 is("@ls", "@ls_good");
 
 my @lines = map "foo $_\n", 1..10;

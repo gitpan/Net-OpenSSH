@@ -1,11 +1,13 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.06';
+our $VERSION = '0.07';
 
 use strict;
 use warnings;
 
 our $debug = 0;
+
+my $append_fd_mode = ($] >= 5.008 ? '>>&' : '>&');
 
 use Carp;
 use POSIX qw(:sys_wait_h);
@@ -486,11 +488,11 @@ sub open_ex {
             close $win;
         }
         if (defined $wout) {
-            open STDOUT, '>>&', $wout or POSIX::_exit(255);
+            open STDOUT, $append_fd_mode, $wout or POSIX::_exit(255);
             close $rout;
         }
         if (defined $werr) {
-            open STDERR, '>>&', $werr or POSIX::_exit(255);
+            open STDERR, $append_fd_mode, $werr or POSIX::_exit(255);
             close $rerr;
         }
         elsif ($stderr_to_stdout) {
