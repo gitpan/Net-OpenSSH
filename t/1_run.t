@@ -3,10 +3,17 @@
 use strict;
 use warnings;
 use Cwd;
-
+use File::Spec;
 use Test::More;
 
+use lib "./t";
+use common;
+
 use Net::OpenSSH;
+my $timeout = 15;
+
+# $Net::OpenSSH::debug = -1;
+
 
 my $V = `ssh -V 2>&1`;
 my ($ver, $num) = $V =~ /^(OpenSSH_(\d+\.\d+).*)$/msi;
@@ -15,11 +22,41 @@ plan skip_all => 'OpenSSH 4.1 or later required'
     unless (defined $num and $num >= 4.1);
 
 chomp $ver;
-diag "\nSSH client found: $ver\nTrying to connect to localhost, timeout is 30s.\n";
+diag "\nSSH client found: $ver.\nTrying to connect to localhost, timeout is ${timeout}s.\n";
 
-my $ssh = Net::OpenSSH->new('localhost', timeout => 30);
+my $ssh = Net::OpenSSH->new('localhost', timeout => $timeout, strict_mode => 0);
 
-plan skip_all => 'Unable to establish SSH connection to localhost'
+# fallback
+if ($ssh->error) {
+    diag "Connection failed... trying fallback aproach";
+    my $sshd_cmd = sshd_cmd;
+    if (defined $sshd_cmd) {
+	my $here = File::Spec->rel2abs("t");
+	diag "sshd command found at $sshd_cmd.\n" .
+	    "Faking connection, timeout is ${timeout}s.\n" .
+	    "Using configuration from '$here'.";
+
+	chmod 0600, "$here/test_user_key", "$here/test_server_key";;
+
+	my @sshd_cmd = ($sshd_cmd, '-i',
+			 -h => "$here/test_server_key",
+			 -o => "AuthorizedKeysFile $here/test_user_key.pub",
+			 -o => "StrictModes no",
+			 -o => "PasswordAuthentication no",
+			 -o => "PermitRootLogin yes");
+	s/(\W)/\\$1/g for @sshd_cmd;
+
+	$ssh = Net::OpenSSH->new('localhost', timeout => $timeout, strict_mode => 0,
+				 master_opts => [-o => "ProxyCommand @sshd_cmd",
+						 -o => "StrictHostKeyChecking no",
+						 -i => "$here/test_user_key"]);
+    }
+    else {
+	diag "sshd command not found!"
+    }
+}
+
+plan skip_all => 'Unable to establish SSH connection to localhost!'
     if $ssh->error;
 
 plan tests => 16;

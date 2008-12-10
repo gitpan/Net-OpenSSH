@@ -1,5 +1,9 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.09  Dec 10, 2009
+	- fallback testing method when ssh'ing to localhost is not enabled
+	- add support for master_opts constructor argument
+	
 0.08  Dec 10, 2009
 	- require 5.8.x and remove compatibility hacks for older versions
 	- solve bug in open_ex when pty is requested

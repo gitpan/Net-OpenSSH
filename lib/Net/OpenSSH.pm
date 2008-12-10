@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.08';
+our $VERSION = '0.09';
 
 use strict;
 use warnings;
@@ -9,7 +9,7 @@ our $debug = 0;
 
 my $append_fd_mode = ($] >= 5.008 ? '>>&' : '>&');
 
-use Carp;
+use Carp qw(carp croak);
 use POSIX qw(:sys_wait_h);
 use File::Spec;
 use Cwd ();
@@ -112,8 +112,21 @@ sub new {
     my $strict_mode = delete $opts{strict_mode};
     $strict_mode = 1 unless defined $strict_mode;
     my $async = delete $opts{async};
+    my $master_opts = delete $opts{master_opts};
 
     _croak_bad_options %opts;
+
+    my @master_opts;
+    if (defined $master_opts) {
+	if (ref($master_opts)) {
+	    @master_opts = @$master_opts;
+	}
+	else {
+	    carp "'master_opts' argument looks like if it should be splited first"
+		if $master_opts =~ /^-\w\s+\S/;
+	    @master_opts = $master_opts;
+	}
+    }
 
     my @cmd_opts;
     push @cmd_opts, -l => $user if defined $user;
@@ -128,7 +141,8 @@ sub new {
                  _passwd => $obfuscate->($passwd),
                  _timeout => $timeout,
                  _home => eval { Cwd::realpath((getpwuid $>)[7]) },
-                 _cmd_opts => \@cmd_opts };
+                 _cmd_opts => \@cmd_opts,
+		 _master_opts => \@master_opts };
     bless $self, $class;
 
     unless (defined $ctl_path) {
@@ -239,7 +253,7 @@ sub _connect {
     }
     unless ($pid) {
         $mpty->make_slave_controlling_terminal if $mpty;
-        my @call = $self->_make_call_ex('-MN');
+        my @call = $self->_make_call_ex([@{$self->{_master_opts}}, '-xMN']);
         eval { exec @call };
         POSIX::_exit(255);
     }
@@ -998,6 +1012,14 @@ in parallel:
       $ssh{$host}->system('ls /');
   }
 }
+
+=item master_opts => [...]
+
+additional options to pass to the ssh command when stablishing the
+master connection. For instance:
+
+  my $ssh = Net::OpenSSH->new($host,
+      master_opts => [-o => "ProxyCommand corkscrew httpproxy 8080 $host"]);
 
 =back
 
