@@ -22,7 +22,7 @@ my $ssh = Net::OpenSSH->new('localhost', timeout => 30);
 plan skip_all => 'Unable to establish SSH connection to localhost'
     if $ssh->error;
 
-plan tests => 15;
+plan tests => 16;
 
 sub shell_quote {
     my $txt = shift;
@@ -59,6 +59,9 @@ is($errput, '', "errput");
 is($output, $lines, "output") or diag $output;
 
 $output = $ssh->capture({stdin_data => \@lines}, "cat");
+is ($output, $lines);
+
+$output = $ssh->capture({stdin_data => \@lines, stderr_to_stdout => 1}, "cat >&2");
 is ($output, $lines);
 
 ($output, $errput) = $ssh->capture2("cat $sq_cwd/test.dat 1>&2");

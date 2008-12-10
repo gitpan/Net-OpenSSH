@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.07';
+our $VERSION = '0.08';
 
 use strict;
 use warnings;
@@ -412,6 +412,14 @@ sub _quote_args {
     map $quoter->($_), @_
 }
 
+# file handles
+sub _check_is_system_fh {
+    my ($name, $fh) = @_;
+    my $fn = fileno(defined $fh ? $fh : $name);
+    return if (defined $fn and $fn >= 0);
+    croak "child process $name is not a real system file handle";
+}
+
 sub open_ex {
     my $self = shift;
     $self->_check_master_and_clear_error or return ();
@@ -461,6 +469,7 @@ sub open_ex {
     else {
         $rin = $stdin_fh;
     }
+    _check_is_system_fh STDIN => $rin;
 
     if ($stdout_pipe) {
         ($rout, $wout) = $self->_make_pipe or return;
@@ -471,9 +480,36 @@ sub open_ex {
     else {
         $wout = $stdout_fh;
     }
+    _check_is_system_fh STDOUT => $wout;
 
-    if ($stderr_pipe) {
-        ($rerr, $werr) = $self->_make_pipe or return;
+    unless ($stderr_to_stdout) {
+	if ($stderr_pipe) {
+	    ($rerr, $werr) = $self->_make_pipe or return ();
+	}
+	elsif (defined $stderr_fh) {
+	    $werr = $stderr_fh;
+	}
+	_check_is_system_fh STDERR => $werr;
+    }
+
+    if (defined $wout and fileno $wout < 1) {
+	my $wout_dup;
+	unless (open $wout_dup, '>>&', $wout) {
+	    $self->_set_error(OSSH_SLAVE_FAILED,
+			      "unable to dup child STDOUT: $!");
+	    return ()
+	}
+	$wout = $wout_dup;
+    }
+
+    if (defined $werr and fileno $werr < 2) {
+	my $werr_dup;
+	unless (open $werr_dup, '>>&', $werr) {
+	    $self->_set_error(OSSH_SLAVE_FAILED,
+			      "unable to dup child STDERR: $!");
+	    return ()
+	}
+	$werr = $werr_dup;
     }
 
     my $pid = fork;
@@ -483,20 +519,26 @@ sub open_ex {
     }
     unless ($pid) {
         if (defined $rin) {
-            $rin->make_slave_controlling_terminal if $tty;
-            open STDIN, '<&', $rin or POSIX::_exit(255);
-            close $win;
+            $rin->make_slave_controlling_terminal if $stdin_pty;
+	    unless (fileno $rin == 0) {
+		open STDIN, '<&', $rin or POSIX::_exit(255);
+	    }
+	    $win and close $win;
         }
         if (defined $wout) {
-            open STDOUT, $append_fd_mode, $wout or POSIX::_exit(255);
-            close $rout;
+	    unless (fileno $wout == 1) {
+		open STDOUT, '>>&', $wout or POSIX::_exit(255);
+	    }
+            $rout and close $rout;
         }
         if (defined $werr) {
-            open STDERR, $append_fd_mode, $werr or POSIX::_exit(255);
-            close $rerr;
+	    unless (fileno $werr == 2) {
+		open STDERR, '>>&', $werr or POSIX::_exit(255);
+	    }
+	    $rerr and close $rerr;
         }
         elsif ($stderr_to_stdout) {
-            open STDERR, '>>&STDOUT' or POSIX::_exit(255);
+	    open STDERR, '>>&STDOUT' or POSIX::_exit(255);
         }
         my @call = $self->_make_call_ex(\@ssh_opts, @args);
         $debug and $debug & 16 and _debug_dump open_ex => \@call;

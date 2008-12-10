@@ -1,5 +1,10 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.08  Dec 10, 2009
+	- require 5.8.x and remove compatibility hacks for older versions
+	- solve bug in open_ex when pty is requested
+	- perform sanity checks on child file handles on open_ex
+	
 0.07  Dec 9, 2009
         - remove >>& incompatibility for perl 5.6.x
 	- in tests, sort "ls" output, as it seems that it can change
