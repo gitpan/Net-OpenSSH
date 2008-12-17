@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.09';
+our $VERSION = '0.10';
 
 use strict;
 use warnings;
@@ -779,6 +779,8 @@ sub sftp {
     Net::SFTP::Foreign->new(open2_cmd => \@call);
 }
 
+sub mux_socket_path { shift->{_ctl_path} }
+
 sub DESTROY {
     my $self = shift;
     my $pid = $self->{_pid};
@@ -1283,6 +1285,11 @@ It returns a true value after the connection has been succesfully
 stablished or false if the connection process fails or if it has not
 yet completed (C<<$ssh->error>> can be used to differentiate between
 both cases).
+
+=item $ssh->mux_socket_path
+
+Returns the path to the socket where OpenSSH listens for new
+multiplexed connections.
 
 =back
 

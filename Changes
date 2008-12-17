@@ -1,5 +1,11 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.10  Dec 11, 2009
+	- require OpenSSH > 4.7 for alternative testing aproach
+	- use correct ps args when testing on Solaris
+	- new mux_socket_path method
+	- more tests
+	
 0.09  Dec 10, 2009
 	- fallback testing method when ssh'ing to localhost is not enabled
 	- add support for master_opts constructor argument

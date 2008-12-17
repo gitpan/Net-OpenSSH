@@ -12,6 +12,8 @@ use common;
 use Net::OpenSSH;
 my $timeout = 15;
 
+my $PS_P = ($^O =~ /sunos|solaris/i ? 'ps -p' : 'ps p');
+
 # $Net::OpenSSH::debug = -1;
 
 
@@ -27,7 +29,7 @@ diag "\nSSH client found: $ver.\nTrying to connect to localhost, timeout is ${ti
 my $ssh = Net::OpenSSH->new('localhost', timeout => $timeout, strict_mode => 0);
 
 # fallback
-if ($ssh->error) {
+if ($ssh->error and $num > 4.7) {
     diag "Connection failed... trying fallback aproach";
     my $sshd_cmd = sshd_cmd;
     if (defined $sshd_cmd) {
@@ -49,6 +51,7 @@ if ($ssh->error) {
 	$ssh = Net::OpenSSH->new('localhost', timeout => $timeout, strict_mode => 0,
 				 master_opts => [-o => "ProxyCommand @sshd_cmd",
 						 -o => "StrictHostKeyChecking no",
+						 -o => "NoHostAuthenticationForLocalhost yes",
 						 -i => "$here/test_user_key"]);
     }
     else {
@@ -59,13 +62,17 @@ if ($ssh->error) {
 plan skip_all => 'Unable to establish SSH connection to localhost!'
     if $ssh->error;
 
-plan tests => 16;
+plan tests => 18;
 
 sub shell_quote {
     my $txt = shift;
     $txt =~ s|([^a-zA-Z0-9+-\./])|\\$1|g;
     $txt
 }
+
+my $muxs = $ssh->mux_socket_path;
+ok(-S $muxs, "mux socket exists");
+is((stat $muxs)[2] & 0777, 0600, "mux socket permissions");
 
 my $cwd = cwd;
 my $sq_cwd = shell_quote $cwd;
@@ -83,10 +90,10 @@ ok($in);
 ok(defined $pid);
 
 print $in $_ for @lines;
-my @ps = `ps p $pid`;
+my @ps = `$PS_P $pid`;
 ok(grep(/ssh/i, @ps));
 ok(close $in);
-@ps = `ps p $pid`;
+@ps = `$PS_P $pid`;
 ok(!grep(/ssh/i, @ps));
 
 ok(-f "$cwd/test.dat");
