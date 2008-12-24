@@ -1,6 +1,6 @@
 package Net::OpenSSH::Constants;
 
-our $VERSION = '0.01';
+our $VERSION = '0.11';
 
 use strict;
 use warnings;
@@ -12,7 +12,8 @@ our %EXPORT_TAGS = (error => []);
 
 my %error = ( OSSH_MASTER_FAILED => 1,
               OSSH_SLAVE_FAILED => 2,
-              OSSH_PIPE_FAILED => 3
+              OSSH_PIPE_FAILED => 3,
+	      OSSH_SLAVE_SCP_FAILED => 4,
             );
 
 for my $key (keys %error) {
@@ -40,7 +41,7 @@ Net::OpenSSH::Constants - Constant definitions for Net::OpenSSH
 
 This module exports the following constants to be used with
 L<Net::OpenSSH>: C<OSSH_MASTER_FAILED>, C<OSSH_SLAVE_FAILED>,
-C<OSSH_PIPE_FAILED>.
+C<OSSH_PIPE_FAILED>, C<OSSH_SLAVE_SCP_FAILED>.
 
 =head1 COPYRIGHT AND LICENSE
 

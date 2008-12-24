@@ -1,21 +1,30 @@
 Revision history for Perl extension Net::OpenSSH.
 
-0.10  Dec 11, 2009
+0.11  Dec 24, 2008
+        - new shell_quote method
+	- add scp_get and scp_put methods
+        - add spawn method
+        - add support for ssh_opts in several methods
+        - _make_call_ex renamed to _make_call
+        - _make_call removed
+        - fix doc errors
+
+0.10  Dec 17, 2008
 	- require OpenSSH > 4.7 for alternative testing aproach
 	- use correct ps args when testing on Solaris
 	- new mux_socket_path method
 	- more tests
 	
-0.09  Dec 10, 2009
+0.09  Dec 10, 2008
 	- fallback testing method when ssh'ing to localhost is not enabled
 	- add support for master_opts constructor argument
 	
-0.08  Dec 10, 2009
+0.08  Dec 10, 2008
 	- require 5.8.x and remove compatibility hacks for older versions
 	- solve bug in open_ex when pty is requested
 	- perform sanity checks on child file handles on open_ex
 	
-0.07  Dec 9, 2009
+0.07  Dec 9, 2008
         - remove >>& incompatibility for perl 5.6.x
 	- in tests, sort "ls" output, as it seems that it can change
           between two consecutive runs in some OSs
