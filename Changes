@@ -1,5 +1,10 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.12  Jan 7, 2009
+        - support timeout option on capture methods (bug report by Pete
+          Emerson).
+        - remove broken perl 5.6.x workarounds
+
 0.11  Dec 24, 2008
         - new shell_quote method
 	- add scp_get and scp_put methods

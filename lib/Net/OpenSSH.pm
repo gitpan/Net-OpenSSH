@@ -1,13 +1,11 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.11';
+our $VERSION = '0.12';
 
 use strict;
 use warnings;
 
 our $debug ||= 0;
-
-my $append_fd_mode = ($] >= 5.008 ? '>>&' : '>&');
 
 use Carp qw(carp croak);
 use POSIX qw(:sys_wait_h);
@@ -114,6 +112,8 @@ sub new {
     $strict_mode = 1 unless defined $strict_mode;
     my $async = delete $opts{async};
     my $master_opts = delete $opts{master_opts};
+    my $target_os = delete $opts{target_os};
+    $target_os = 'unix' unless defined $target_os;
 
     _croak_bad_options %opts;
 
@@ -144,7 +144,8 @@ sub new {
                  _timeout => $timeout,
                  _home => eval { Cwd::realpath((getpwuid $>)[7]) },
                  _ssh_opts => \@ssh_opts,
-		 _master_opts => \@master_opts };
+		 _master_opts => \@master_opts,
+		 _target_os => $target_os };
     bless $self, $class;
 
     unless (defined $ctl_path) {
@@ -614,10 +615,11 @@ sub pipe_out {
 }
 
 sub _io3 {
-    my ($self, $pid, $out, $err, $in, $stdin_data) = @_;
+    my ($self, $pid, $out, $err, $in, $stdin_data, $timeout) = @_;
     $self->_check_master_and_clear_error or return ();
     my @data = (ref $stdin_data eq 'ARRAY' ? @$stdin_data : $stdin_data);
     my ($cout, $cerr, $cin) = (defined($out), defined($err), defined($in));
+    $timeout = $self->{_timeout} unless defined $timeout;
 
     my $has_input = grep { defined and length } @data;
     croak "remote input channel is not defined but data is available for sending"
@@ -653,7 +655,7 @@ sub _io3 {
         my $recalc_vecs;
     FAST: until ($recalc_vecs) {
             my ($rv1, $wv1) = ($rv, $wv);
-            my $n = select ($rv1, $wv1, undef, $self->{timeout});
+            my $n = select ($rv1, $wv1, undef, $timeout);
             if ($n > 0) {
                 if ($cout and vec($rv1, $fnoout, 1)) {
                     my $read = sysread($out, $bout, 20480, length($bout));
@@ -775,13 +777,14 @@ sub capture {
 
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $stdin_data = delete $opts{stdin_data};
+    my $timeout = delete $opts{timeout};
     _croak_bad_options %opts;
 
     my ($in, $out, undef, $pid) =
         $self->open_ex({ stdout_pipe => 1,
                          stdin_pipe => (defined $stdin_data ? 1 : undef),
                          %opts }, @_) or return ();
-    my ($output) = $self->_io3($pid, $out, undef, $in, $stdin_data);
+    my ($output) = $self->_io3($pid, $out, undef, $in, $stdin_data, $timeout);
     if (wantarray) {
         my $pattern = quotemeta $/;
         return split /(?<=$pattern)/, $output;
@@ -794,6 +797,7 @@ sub capture2 {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $stdin_data = delete $opts{stdin_data};
+    my $timeout = delete $opts{timeout};
     _croak_bad_options %opts;
 
     my ($in, $out, $err, $pid) =
@@ -803,7 +807,7 @@ sub capture2 {
                           %opts }, @_)
             or return ();
 
-    $self->_io3($pid, $out, $err, $in, $stdin_data);
+    $self->_io3($pid, $out, $err, $in, $stdin_data, $timeout);
 }
 
 sub scp_get {
@@ -933,16 +937,27 @@ Net::OpenSSH - Perl SSH client package implemented on top of OpenSSH
   use Net::OpenSSH;
 
   my $ssh = Net::OpenSSH->new($host);
-  $ssh->system("ls /tmp");
+  $ssh->error and
+    die "Couldn't stablish SSH connection: ". $ssh->error;
+
+  $ssh->system("ls /tmp") == 0 or
+    die "remote system command failed with code: " . ($! >> 8);
 
   my @ls = $ssh->capture("ls");
+  $ssh->error and
+    die "remote ls command failed: " . $ssh->error;
+
   my ($out, $err) = $ssh->capture2("find /root");
 
-  my ($rin, $pid) = $ssh->pipe_in("cat >/tmp/foo");
+  my ($rin, $pid) = $ssh->pipe_in("cat >/tmp/foo")
+    or die "pipe_in method failed: " . $ssh->error;
+
   print $rin, "hello\n";
   close $rin;
 
-  my ($rout, $pid) = $ssh->pipe_out("cat /tmp/foo");
+  my ($rout, $pid) = $ssh->pipe_out("cat /tmp/foo")
+    or die "pipe_out method failed: " . $ssh->error;
+
   while (<$rout>) { print }
   close $rout;
 
@@ -952,7 +967,7 @@ Net::OpenSSH - Perl SSH client package implemented on top of OpenSSH
   my ($pty, $err, $pid) = $ssh->open3pty("login");
 
   my $sftp = $ssh->sftp();
-
+  $sftp->error and die "SFTP failed: " . $sftp->error;
 
 
 =head1 DESCRIPTION
@@ -1004,7 +1019,7 @@ any mandatory dependencies (obviously, besides requiring OpenSSH
 binaries).
 
 Net::OpenSSH has a very perlish interface. Most operation are
-performed in a fashion very similar to that or Perl builtins and
+performed in a fashion very similar to that of Perl builtins and
 common modules (i.e. L<IPC::Open2>).
 
 It is also very fast. The overhead introduced by launching a new ssh
@@ -1012,9 +1027,9 @@ process for every operation is not apreciable (at least on my Linux
 box). The bottleneck is on the latency intrinsic to the protocol, so
 Net::OpenSSH is probably as fast as an SSH client can be.
 
-Being based on OpenSSH is also an advantage in several ways as a
-proved, stable, secure (to paranoic levels), interoperable and well
-maintained implementation of the SSH protocol is used.
+Being based on OpenSSH is also an advantage: a proved, stable, secure
+(to paranoic levels), interoperable and well maintained implementation
+of the SSH protocol is used.
 
 On the other hand, Net::OpenSSH does not work on Windows.
 
@@ -1378,8 +1393,13 @@ attachs the remote command stdin stream to the given file handle.
 
 =item timeout => $timeout
 
-The operation is aborted after C<$timeout> seconds elapse without any
+The operation is aborted after C<$timeout> seconds elapse without
 network activity.
+
+As the Secure Shell protocol does not support signalling remote
+processes, in order to abort the remote process its input and output
+channels are closed. Unfortunately this aproach does not work in some
+cases.
 
 =back
 
@@ -1415,15 +1435,19 @@ network activity.
 =item $ssh->scp_put(\%opts, $local, $local2,..., $remote_dir_or_file)
 
 These two methods are wrappers around the C<scp> command that allow to
-send and retrieve files to the remote host reusing the existant SSH
-connection.
+send and retrieve files to the remote host reusing the existant master
+SSH connection.
 
-If transfer of several files is requested on the same call the latest
-argument should point to an existant directory. If only one file is to
-be transferred, the target argument can be omited.
+When transferring several files, the target argument must point to a
+existant directory. If only one file is to be transferred, the target
+argument can be a directory or a file name or can be ommited. For
+instance:
 
-Both methods return a true value when all the files are transferred
-correctly, otherwise they return undef.
+  $ssh->scp_get({glob => 1}, '/var/tmp/foo*', '/var/tmp/bar*', '/tmp');
+  $ssh->scp_put('/etc/passwd');
+
+Both C<scp_get> and C<scp_put> methods return a true value when all
+the files are transferred correctly, otherwise they return undef.
 
 The accepted options are:
 
@@ -1432,8 +1456,8 @@ The accepted options are:
 =item quiet => 0
 
 By default C<scp> is called with the quite flag C<-q> enabled in order
-to suppress any progress information. This option allows to disable
-scp quite feature.
+to suppress any progress information. This option allows to reenable
+the progress indication bar.
 
 =item recursive => 1
 
@@ -1441,11 +1465,12 @@ Copy files and directories recursively.
 
 =item glob => 1
 
-Allow expansion of shell metacharacters on the sources list.
+Allow expansion of shell metacharacters on the sources list so that
+willcards can be used to select files.
 
 =item glob_flags => $flags
 
-Second argument passed to L<File::Glob> bsd_glob function. Only
+Second argument passed to L<File::Glob> C<bsd_glob> function. Only
 available for C<scp_put> method.
 
 =item async => 1
@@ -1473,13 +1498,13 @@ available.
 
 It returns a true value after the connection has been succesfully
 stablished or false if the connection process fails or if it has not
-yet completed (C<<$ssh->error>> can be used to differentiate between
+yet completed (C<$ssh-E<gt>error> can be used to differentiate between
 both cases).
 
 =item $ssh->shell_quote(@args)
 
-return the list of arguments quoted so that they can are restored when
-parsed by the remote shell.
+return the list of arguments quoted so that they will be restored to
+their original form when parsed by the remote shell.
 
 Usually this task is done automatically by the module. See "Shell
 quoting" below.
@@ -1506,16 +1531,18 @@ L<perlfunc/system>:
   to the system's command shell for parsing (this is "/bin/sh -c" on
   Unix platforms, but varies on other platforms).
 
-Taken for example the method Net::OpenSSH C<system> method:
+Taken for example Net::OpenSSH C<system> method:
 
   $ssh->system("ls -l *");
   $ssh->system('ls', '-l', '/');
 
 The first call passes the argument unchanged to ssh, so that it is
-executed in the remote side through the user default shell that
-interprets shell metacharacters.
+executed in the remote side through the shell which interprets shell
+metacharacters.
 
-The second call passes the arguments unchanged to the command.
+The second call escapes especial shell characters, so that
+effectively, it is equivalent to calling the command directly and not
+through the shell.
 
 Under the hood, as the Secure Shell protocol does not have provision
 for this mode of operation and always spawns a new shell where it runs
@@ -1599,6 +1626,8 @@ people can also find them.
 - passphrase handling
 
 - integrate with IPC::PerlSSH
+
+- better timeout handling in capture methods
 
 Send your feature requests, ideas or any feedback, please!
 
