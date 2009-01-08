@@ -1,5 +1,15 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.13  Jan 8, 2009
+        - when globing in scp_get, quote spaces only
+        - add quote_spaces_only feature to _quote_args method
+        - some scp_put and scp_get problems solved (bug report and
+          patch by Maxim Yemelyanov).
+	- _quote_args was returning wrong result in scalar context
+          (bug report and solution also by Maxim Yemelyanov).
+	- set umask when creating ctl_dir (bug report by Maxim
+          Yemelyanov).
+
 0.12  Jan 7, 2009
         - support timeout option on capture methods (bug report by Pete
           Emerson).

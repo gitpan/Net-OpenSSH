@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.12';
+our $VERSION = '0.13';
 
 use strict;
 use warnings;
@@ -152,7 +152,9 @@ sub new {
         $ctl_dir = File::Spec->catdir($self->{_home}, ".libnet-openssh-perl")
             unless defined $ctl_dir;
 
+	my $old_umask = umask 077;
         mkdir $ctl_dir;
+	umask $old_umask;
         unless (-d $ctl_dir) {
             $self->_set_error(OSSH_MASTER_FAILED, "unable to create ctl_dir $ctl_dir: $!");
             return $self;
@@ -427,15 +429,30 @@ sub _arg_quoter {
     }
 }
 
+sub _arg_quoter_spaces_only {
+    sub {
+	my $arg = shift;
+	$arg =~ s|(\s)|\\$1|g;
+	$arg;
+    }
+}
+
 sub _quote_args {
     my $self = shift;
     my $opts = shift;
     ref $opts eq 'HASH' or die "internal error";
     my $quote = delete $opts->{quote_args};
+    my $spaces_only = delete $opts->{quote_spaces_only};
     $quote = (@_ > 1) unless defined $quote;
-    return @_ unless $quote;
-    my $quoter = $self->_arg_quoter;
-    wantarray ? map $quoter->($_), @_ : $quoter->($_[0])
+    if ($quote) {
+	my $quoter = ($spaces_only
+		      ? $self->_arg_quoter_spaces_only
+		      : $self->_arg_quoter);
+	wantarray ? map $quoter->($_), @_ : $quoter->($_[0])
+    }
+    else {
+	wantarray ? @_ : $_[0]
+    }
 }
 
 sub shell_quote {
@@ -822,9 +839,9 @@ sub scp_get {
     my $target = (@_ > 1 ? pop @_ : '.');
     $target =~ m|^[^/]*:| and $target = "./$target";
 
-    my @src = map "$self->{_host}:$_", ( $glob
-					 ? @_ 
-					 : $self->_quote_args({}, @_) );
+    my @src = map "$self->{_host}:$_", $self->_quote_args({quote_args => 1,
+							   quote_spaces_only => $glob},
+							  @_);
 
     $self->_scp(\%opts, @src, $target);
 }
@@ -839,9 +856,9 @@ sub scp_put {
     my $glob = delete $opts{glob};
     my $glob_flags = ($glob ? delete $opts{glob_flags} || 0 : undef);
 
-    my $target = "$self->{_host}:" . ( @_ > 1
-				       ? $self->_quote_args({}, pop(@_))
-				       : '');
+    my $target = $self->{_host}. ':' . ( @_ > 1
+					 ? $self->_quote_args({quote_args => 1}, pop(@_))
+					 : '');
 
     my @src = @_;
     if ($glob) {
