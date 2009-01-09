@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.13';
+our $VERSION = '0.14';
 
 use strict;
 use warnings;
@@ -14,8 +14,6 @@ use Cwd ();
 use Scalar::Util ();
 use Errno ();
 use Net::OpenSSH::Constants qw(:error);
-
-# { my $old = select; select STDERR; $| = 1; select $old }
 
 sub _debug { print STDERR '# ', @_, "\n" }
 
@@ -107,6 +105,8 @@ sub new {
     my $ssh_cmd = delete $opts{ssh_cmd};
     $ssh_cmd = 'ssh' unless defined $ssh_cmd;
     my $scp_cmd = delete $opts{scp_cmd};
+    my $rsync_cmd = delete $opts{rsync_cmd};
+    $rsync_cmd = 'rsync' unless defined $rsync_cmd;
     my $timeout = delete $opts{timeout};
     my $strict_mode = delete $opts{strict_mode};
     $strict_mode = 1 unless defined $strict_mode;
@@ -136,6 +136,7 @@ sub new {
     my $self = { _error => 0,
                  _ssh_cmd => $ssh_cmd,
 		 _scp_cmd => $scp_cmd,
+		 _rsync_cmd => $rsync_cmd,
                  _pid => undef,
                  _host => $host,
                  _user => $user,
@@ -236,6 +237,21 @@ sub _make_scp_call {
                 @{$self->{_ssh_opts}}, '--', @_);
 
     $debug and $debug & 8 and _debug_dump 'scp call args' => \@args;
+    @args;
+}
+
+sub _make_rsync_call {
+    my $self = shift;
+    my $before = shift;
+    my @ssh_args = $self->_make_call($before);
+    pop @ssh_args; # rsync adds the target host itself
+    my $transport = join(' ', $self->shell_quote(@ssh_args));
+    $transport =~ s/%/%%/g;
+    my @args = ( $self->{_rsync_cmd},
+		 -e => $transport,
+		 @_);
+
+    $debug and $debug & 8 and _debug_dump 'rsync call args' => \@args;
     @args;
 }
 
@@ -501,7 +517,8 @@ sub open_ex {
     if (defined $ssh_opts) {
 	@ssh_opts = (ref $ssh_opts eq 'ARRAY' ? @$ssh_opts : $ssh_opts);
     }
-    my $scp = delete $opts{_scp};
+    my $cmd = delete $opts{_cmd};
+    $cmd = 'ssh' unless defined $cmd;
 
     my @args = $self->_quote_args(\%opts, @_);
     _croak_bad_options %opts;
@@ -592,9 +609,11 @@ sub open_ex {
         elsif ($stderr_to_stdout) {
 	    open STDERR, '>>&STDOUT' or POSIX::_exit(255);
         }
-        my @call = ( $scp
-		     ? $self->_make_scp_call(\@ssh_opts, @args)
-		     : $self->_make_call(\@ssh_opts, @args) );
+        my @call = ( $cmd eq 'ssh'   ? $self->_make_call(\@ssh_opts, @args)       :
+		     $cmd eq 'scp'   ? $self->_make_scp_call(\@ssh_opts, @args)   :
+		     $cmd eq 'rsync' ? $self->_make_rsync_call(\@ssh_opts, @args) :
+		     die "internal error: bad _cmd protocol" );
+
         $debug and $debug & 16 and _debug_dump open_ex => \@call;
         do { exec @call };
         POSIX::_exit(255);
@@ -827,13 +846,19 @@ sub capture2 {
     $self->_io3($pid, $out, $err, $in, $stdin_data, $timeout);
 }
 
-sub scp_get {
+sub _calling_method {
+    my $method = (caller 2)[3];
+    $method =~ s/.*:://;
+    $method;
+}
+
+sub _scp_get_args {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
 
     @_ > 0 or croak
-	'Usage: $ssh->scp_get(\%opts, $remote_fn1, $remote_fn2, ..., $local_fn_or_dir)';
-
+	'Usage: $ssh->' . _calling_method . '(\%opts, $remote_fn1, $remote_fn2, ..., $local_fn_or_dir)';
+   
     my $glob = delete $opts{glob};
 
     my $target = (@_ > 1 ? pop @_ : '.');
@@ -842,16 +867,25 @@ sub scp_get {
     my @src = map "$self->{_host}:$_", $self->_quote_args({quote_args => 1,
 							   quote_spaces_only => $glob},
 							  @_);
-
-    $self->_scp(\%opts, @src, $target);
+    ($self, \%opts, $target, @src);
 }
 
-sub scp_put {
+sub scp_get {
+    my ($self, $opts, $target, @src) = _scp_get_args @_;
+    $self->_scp($opts, @src, $target);
+}
+
+sub rsync_get {
+    my ($self, $opts, $target, @src) = _scp_get_args @_;
+    $self->_rsync($opts, @src, $target);
+}
+
+sub _scp_put_args {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
 
     @_ > 0 or croak
-	'Usage: $ssh->scp_put(\%opts, $local_fn1, $local_fn2, ..., $remote_dir_or_fn)';
+	'Usage: $ssh->' . _calling_method . '(\%opts, $local_fn1, $local_fn2, ..., $remote_dir_or_fn)';
 
     my $glob = delete $opts{glob};
     my $glob_flags = ($glob ? delete $opts{glob_flags} || 0 : undef);
@@ -872,9 +906,18 @@ sub scp_put {
     }
     $_ = "./$_" for grep m|^[^/]*:|, @src;
 
-    $self->_scp(\%opts, @src, $target);
+    ($self, \%opts, $target, @src);
 }
 
+sub scp_put {
+    my ($self, $opts, $target, @src) = _scp_put_args @_;
+    $self->_scp($opts, @src, $target);
+}
+
+sub rsync_put {
+    my ($self, $opts, $target, @src) = _scp_put_args @_;
+    $self->_rsync($opts, @src, $target);
+}
 
 sub _scp {
     my $self = shift;
@@ -883,21 +926,20 @@ sub _scp {
     $quiet = 1 unless defined $quiet;
     my $recursive = delete $opts{recursive};
     my $async = delete $opts{async};
-
     _croak_bad_options %opts;
 
     my @opts;
     push @opts, '-q' if $quiet;
     push @opts, '-r' if $recursive;
 
-    my $pid = $self->open_ex({ _scp => 1,
+    my $pid = $self->open_ex({ _cmd => 'scp',
 			       ssh_opts => \@opts,
 			       quote_args => 0 },
 			     @_);
 
     unless (defined $pid) {
 	$self->_set_error(OSSH_SLAVE_SCP_FAILED,
-			  "unable to spawn scp process: ".$self->error);
+			  "unable to spawn scp process: " . $self->error);
 	return undef
     }
 
@@ -919,6 +961,75 @@ sub _scp {
 	# wait a bit before trying again
 	select(undef, undef, undef, 0.1);
     }
+}
+
+my %rsync_opt_with_arg = map { $_ => 1 } qw(chmod suffix backup-dir rsync-path max-delete max-size min-size partial-dir
+                                            timeout modify-window temp-dir compare-dest copy-dest link-dest compress-level
+                                            skip-compress filter exclude exclude-from include include-from
+                                            out-format log-file log-file-format bwlimit protocol iconv checksum-seed);
+
+my %rsync_opt_forbiden = map { $_ => 1 } qw(rsh address port sockopts blocking-io password-file write-batch
+                                            only-write-batch read-batch ipv4 ipv6 version help daemon config detach
+                                            files-from from0 blocking-io protect-args list-only);
+
+$rsync_opt_forbiden{"no-$_"} = 1 for (keys %rsync_opt_with_arg, keys %rsync_opt_forbiden);
+
+
+sub _rsync {
+    my $self = shift;
+    my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
+    my $async = delete $opts{async};
+    my $verbose = delete $opts{verbose};
+    my $quiet = delete $opts{quiet};
+    $quiet = 1 unless (defined $quiet or $verbose);
+
+    my @opts = qw(--blocking-io) ;
+    push @opts, '-q' if $quiet;
+    push @opts, '-v' if $verbose;
+
+    for my $opt (keys %opts) {
+	my $value = $opts{$opt};
+	if (defined $value) {
+	    my $opt1 = $opt;
+	    $opt1 =~ tr/_/-/;
+	    $rsync_opt_forbiden{$opt1} and croak "forbiden rsync option '$opt' used";
+	    if ($rsync_opt_with_arg{$opt}) {
+		push @opts, "--$opt1=$_"
+		    for (ref($value) eq 'ARRAY' ? @$value : $value);
+	    }
+	    else {
+		$value = !$value if $opt1 =~ s/^no-//;
+		push @opts, ($value ? "--$opt1" : "--no-$opt1");
+	    }
+	}
+    }
+
+    my $pid = $self->open_ex({ _cmd => 'rsync',
+			       quote_args => 0 },
+			     @opts, '--', @_);
+    unless (defined $pid) {
+	$self->_set_error(OSSH_SLAVE_RSYNC_FAILED,
+			  "unable to spawn rsync process: " . $self->error);
+	return undef;
+    }
+
+    return $pid if $async;
+
+    while(1) {
+	if (waitpid($pid, 0) == $pid) {
+	    if ($?) {
+		$self->_set_error(OSSH_SLAVE_RSYNC_FAILED, "rsync exited with error code ". ($?>>8));
+		return undef;
+	    }
+	    return 1;
+	}
+	if ($! == eval { Errno::ECHILD() }) {
+	    $self->_set_error(OSSH_SLAVE_RSYNC_FAILED, "rsync operation failed: $!");
+	    return undef
+	}
+	select(undef, undef, undef, 0.1);
+    }
+
 }
 
 sub sftp {
@@ -1056,8 +1167,9 @@ client). Though, note that it will interacturate with any server
 software, not just servers running OpenSSH C<sshd>.
 
 For password authentication, L<IO::Pty> has to be installed. Other
-modules are also required to implement specific functionality (for
-instance L<Net::SFTP::Foreign> or L<Expect>).
+modules and binaries are also required to implement specific
+functionality (for instance L<Net::SFTP::Foreign>, L<Expect> or
+L<rsync(1)>).
 
 =head1 API
 
@@ -1145,6 +1257,10 @@ name or full path to OpenSSH C<ssh> binary. For instance:
 name or full path to OpenSSH C<scp> binary.
 
 By default it is inferred from the C<ssh> one.
+
+=item rsync_cmd => $cmd
+
+name or full path to C<rsync> binary. Defaults to C<rsync>.
 
 =item timeout => $timeout
 
@@ -1497,6 +1613,21 @@ used the method returns the PID of the child C<scp> process.
 
 =back
 
+
+=item $ssh->rsync_get(\%opts, $remote1, $remote2,..., $local_dir_or_file)
+
+=item $ssh->rsync_put(\%opts, $local1, $local2,..., $remote_dir_or_file)
+
+Use rsync over SSH to transfer files from/to the remote machine.
+
+These methods accept the same set of options as the SCP ones. Also,
+any unrecognized option will be passed as an argument to the C<rsync>
+command. For instance:
+
+  $ssh->rsync_get({exclude => '*~',
+                   verbose => 1},
+                  '/remote/dir', '/local/dir');
+
 =item $sftp = $ssh->sftp
 
 Creates a new L<Net::SFTP::Foreign> object for SFTP interaction that
@@ -1557,7 +1688,7 @@ The first call passes the argument unchanged to ssh, so that it is
 executed in the remote side through the shell which interprets shell
 metacharacters.
 
-The second call escapes especial shell characters, so that
+The second call escapes especial shell characters, so that,
 effectively, it is equivalent to calling the command directly and not
 through the shell.
 
@@ -1615,9 +1746,7 @@ L<Net::SSH::Perl>.
 
 =head1 BUGS AND SUPPORT
 
-This is a very early release, expect lots of bugs. Also the API is
-provisional and will be changed as required in order to improve the
-module.
+SCP and rsync file transfer support is still highly experimental.
 
 Does not work on Windows. OpenSSH multiplexing feature requires
 passing file handles through sockets but that is not supported by
@@ -1646,11 +1775,13 @@ people can also find them.
 
 - better timeout handling in capture methods
 
+- add support for more target OSs (quoting)
+
 Send your feature requests, ideas or any feedback, please!
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2008 by Salvador FandiE<ntilde>o (sfandino@yahoo.com)
+Copyright (C) 2008, 2009 by Salvador FandiE<ntilde>o (sfandino@yahoo.com)
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself, either Perl version 5.10.0 or,

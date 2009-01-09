@@ -1,5 +1,10 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.14  Jan 9, 2009
+        - add experimental support for rsync file transfers
+	- rework scp implementation in order to share as much as
+          possible with rsync methods
+
 0.13  Jan 8, 2009
         - when globing in scp_get, quote spaces only
         - add quote_spaces_only feature to _quote_args method
