@@ -1,5 +1,12 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.15  Jan 9, 2009
+        - do not escape dots when quoting args
+	- some shell quoting tests added
+	- better glob quoting
+	- informative rsync error messages
+	- doc improvements and typos
+
 0.14  Jan 9, 2009
         - add experimental support for rsync file transfers
 	- rework scp implementation in order to share as much as

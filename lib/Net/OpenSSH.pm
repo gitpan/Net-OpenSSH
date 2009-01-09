@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.14';
+our $VERSION = '0.15';
 
 use strict;
 use warnings;
@@ -440,15 +440,15 @@ sub _load_module {
 sub _arg_quoter {
     sub {
         my $arg = shift;
-        $arg =~ s|([^\w/-])|\\$1|g;
+        $arg =~ s|([^\w/\-.])|\\$1|g;
         $arg
     }
 }
 
-sub _arg_quoter_spaces_only {
+sub _arg_quoter_glob {
     sub {
 	my $arg = shift;
-	$arg =~ s|(\s)|\\$1|g;
+        $arg =~ s|(?<!\\)([^\w/\-+=*?\[\],{}:\@!.^\\])|\\$1|g;
 	$arg;
     }
 }
@@ -458,11 +458,11 @@ sub _quote_args {
     my $opts = shift;
     ref $opts eq 'HASH' or die "internal error";
     my $quote = delete $opts->{quote_args};
-    my $spaces_only = delete $opts->{quote_spaces_only};
+    my $glob_quoting = delete $opts->{glob_quoting};
     $quote = (@_ > 1) unless defined $quote;
     if ($quote) {
-	my $quoter = ($spaces_only
-		      ? $self->_arg_quoter_spaces_only
+	my $quoter = ($glob_quoting
+		      ? $self->_arg_quoter_glob
 		      : $self->_arg_quoter);
 	wantarray ? map $quoter->($_), @_ : $quoter->($_[0])
     }
@@ -865,7 +865,7 @@ sub _scp_get_args {
     $target =~ m|^[^/]*:| and $target = "./$target";
 
     my @src = map "$self->{_host}:$_", $self->_quote_args({quote_args => 1,
-							   quote_spaces_only => $glob},
+							   glob_quoting => $glob},
 							  @_);
     ($self, \%opts, $target, @src);
 }
@@ -974,6 +974,27 @@ my %rsync_opt_forbiden = map { $_ => 1 } qw(rsh address port sockopts blocking-i
 
 $rsync_opt_forbiden{"no-$_"} = 1 for (keys %rsync_opt_with_arg, keys %rsync_opt_forbiden);
 
+my %rsync_error = (1, 'syntax or usage error',
+		   2, 'protocol incompatibility',
+		   3, 'errors selecting input/output files, dirs',
+		   4, 'requested action not supported: an attempt was made to manipulate 64-bit files on a platform '.
+                      'that  cannot  support them; or an option was specified that is supported by the client and not '.
+                      'by the server.',
+		   5, 'error starting client-server protocol',
+		   6, 'daemon unable to append to log-file',
+		   10, 'error in socket I/O',
+		   11, 'error in file I/O',
+		   12, 'error in rsync protocol data stream',
+		   13, 'errors with program diagnostics',
+		   14, 'error in IPC code',
+		   20, 'received SIGUSR1 or SIGINT',
+		   21, 'some error returned by waitpid()',
+		   22, 'error allocating core memory buffers',
+		   23, 'partial transfer due to error',
+		   24, 'partial transfer due to vanished source files',
+		   25, 'the --max-delete limit stopped deletions',
+		   30, 'timeout in data send/receive',
+		   35, 'timeout waiting for daemon connection');
 
 sub _rsync {
     my $self = shift;
@@ -1018,7 +1039,12 @@ sub _rsync {
     while(1) {
 	if (waitpid($pid, 0) == $pid) {
 	    if ($?) {
-		$self->_set_error(OSSH_SLAVE_RSYNC_FAILED, "rsync exited with error code ". ($?>>8));
+		my $err = ($? >> 8);
+		my $errstr = $rsync_error{$err};
+		$errstr = 'Unknown rsync error' unless defined $errstr;
+		my $signal = $? & 255;
+		my $signalstr = ($signal ? " (signal $signal)" : '');
+		$self->_set_error(OSSH_SLAVE_RSYNC_FAILED, "rsync exited with error code $err$signalstr: $errstr");
 		return undef;
 	    }
 	    return 1;
@@ -1547,7 +1573,7 @@ The accepted options are:
 
 =item stdin_data => $input
 
-=item stdin_data => @input
+=item stdin_data => \@input
 
 sends the given data to the stdin stream while simultaneously captures
 the output on stdout and stderr.
@@ -1568,10 +1594,10 @@ network activity.
 =item $ssh->scp_put(\%opts, $local, $local2,..., $remote_dir_or_file)
 
 These two methods are wrappers around the C<scp> command that allow to
-send and retrieve files to the remote host reusing the existant master
-SSH connection.
+transfer files to/from the remote host reusing the existant SSH master
+connection.
 
-When transferring several files, the target argument must point to a
+When transferring several files, the target argument must point to an
 existant directory. If only one file is to be transferred, the target
 argument can be a directory or a file name or can be ommited. For
 instance:
@@ -1588,9 +1614,9 @@ The accepted options are:
 
 =item quiet => 0
 
-By default C<scp> is called with the quite flag C<-q> enabled in order
-to suppress any progress information. This option allows to reenable
-the progress indication bar.
+By default, C<scp> is called with the quite flag C<-q> enabled in
+order to suppress any progress information. This option allows to
+reenable the progress indication bar.
 
 =item recursive => 1
 
@@ -1618,15 +1644,23 @@ used the method returns the PID of the child C<scp> process.
 
 =item $ssh->rsync_put(\%opts, $local1, $local2,..., $remote_dir_or_file)
 
-Use rsync over SSH to transfer files from/to the remote machine.
+These methods use rsync over SSH to transfer files from/to the remote
+machine.
 
-These methods accept the same set of options as the SCP ones. Also,
-any unrecognized option will be passed as an argument to the C<rsync>
-command. For instance:
+They accept the same set of options as the SCP ones.
+
+Any unrecognized option will be passed as an argument to the C<rsync>
+command. Underscores can be used instead of dashes in C<rsync> option
+names.
+
+For instance:
 
   $ssh->rsync_get({exclude => '*~',
-                   verbose => 1},
+                   verbose => 1,
+                   safe_links => 1},
                   '/remote/dir', '/local/dir');
+
+
 
 =item $sftp = $ssh->sftp
 
@@ -1639,10 +1673,10 @@ When the connection has been stablished calling the constructor with
 the C<async> option, this call allows to advance the process.
 
 If C<$async> is true, it will perform any work that can be done
-inmediately without waiting (for instance, entering the password) and
-then return. If a false value is given, it will finalize the
-connection process and wait until the multiplexing socket is
-available.
+inmediately without waiting (for instance, entering the password or
+checking for the existence of the multiplexing socket) and then
+return. If a false value is given, it will finalize the connection
+process and wait until the multiplexing socket is available.
 
 It returns a true value after the connection has been succesfully
 stablished or false if the connection process fails or if it has not
@@ -1720,6 +1754,11 @@ arguments and leave others untouched:
                $ssh->shell_quote('ls', '-l'),
                "/tmp/files_*.dat");
 
+When the glob option is set in scp and rsync file transfer methods, an
+alternative quoting method that knows about file willcards and pass
+them unquoted is used. The set of willcards recognized currently is
+the one supported by L<bash(1)>.
+
 As shell quoting is a tricky matter, I expect bugs to pop up in this
 area. You can see how C<ssh> is called, and the quoting used setting
 the corresponding debug flag:
@@ -1776,6 +1815,8 @@ people can also find them.
 - better timeout handling in capture methods
 
 - add support for more target OSs (quoting)
+
+- add tests for scp and rsync methods
 
 Send your feature requests, ideas or any feedback, please!
 

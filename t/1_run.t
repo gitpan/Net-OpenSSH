@@ -62,7 +62,7 @@ if ($ssh->error and $num > 4.7) {
 plan skip_all => 'Unable to establish SSH connection to localhost!'
     if $ssh->error;
 
-plan tests => 18;
+plan tests => 21;
 
 sub shell_quote {
     my $txt = shift;
@@ -120,3 +120,7 @@ is ($output, $string, "quote_args");
 
 eval { $ssh->capture({foo => 1}, 'bar') };
 ok($@ =~ /option/ and $@ =~ /foo/);
+
+is ($ssh->shell_quote('/foo/'), '/foo/');
+is ($ssh->shell_quote('./foo*/bar&biz;'), './foo\\*/bar\\&biz\\;');
+is ($ssh->_quote_args({quote_args => 1, glob_quoting => 1}, './foo*/bar&biz;'), './foo*/bar\\&biz\\;');
