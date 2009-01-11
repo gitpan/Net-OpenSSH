@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.15';
+our $VERSION = '0.16';
 
 use strict;
 use warnings;
@@ -740,9 +740,8 @@ sub _io3 {
     return ($bout, $berr);
 }
 
-_sub_options spawn_good => qw(stderr_to_stdout stdin_fh stdout_fh
-                              stderr_fh quote_args tty ssh_opts);
-
+_sub_options spawn => qw(stderr_to_stdout stdin_fh stdout_fh
+                         stderr_fh quote_args tty ssh_opts);
 sub spawn {
     my $self = shift;
     my %opts =  (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -751,8 +750,8 @@ sub spawn {
     return scalar $self->open_ex(\%opts, @_);
 }
 
-_sub_options open2_good => qw(stderr_to_stdout stderr_fh
-                              quote_args tty ssh_opts);
+_sub_options open2 => qw(stderr_to_stdout stderr_fh
+                         quote_args tty ssh_opts);
 sub open2 {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -919,20 +918,28 @@ sub rsync_put {
     $self->_rsync($opts, @src, $target);
 }
 
+_sub_options _scp => qw(stderr_to_stdout stderr_fh stdout_fh);
 sub _scp {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $quiet = delete $opts{quiet};
     $quiet = 1 unless defined $quiet;
     my $recursive = delete $opts{recursive};
+    my $copy_attrs = delete $opts{copy_attrs};
+    my $bwlimit = delete $opts{bwlimit};
     my $async = delete $opts{async};
+    my $ssh_opts = delete $opts{ssh_opts};
     _croak_bad_options %opts;
 
     my @opts;
+    @opts = @$ssh_opts if $ssh_opts;
     push @opts, '-q' if $quiet;
     push @opts, '-r' if $recursive;
+    push @opts, '-p' if $copy_attrs;
+    push @opts, '-l', $bwlimit if defined $bwlimit;
 
-    my $pid = $self->open_ex({ _cmd => 'scp',
+    my $pid = $self->open_ex({ %opts,
+                               _cmd => 'scp',
 			       ssh_opts => \@opts,
 			       quote_args => 0 },
 			     @_);
@@ -1632,10 +1639,31 @@ willcards can be used to select files.
 Second argument passed to L<File::Glob> C<bsd_glob> function. Only
 available for C<scp_put> method.
 
+=item copy_attrs => 1
+
+Copies modification and access times and modes from the original
+files.
+
+=item bwlimit => $Kbits
+
+Limits the used bandwith, specified in Kbit/s.
+
 =item async => 1
 
 Doesn't wait for the C<scp> command to finish. When this option is
 used the method returns the PID of the child C<scp> process.
+
+=item stdout_fh => $fh
+
+=item stderr_fh => $fh
+
+=item stderr_to_stdout => 1
+
+These options are passed unchanged to method C<open_ex>, allowing to
+capture the output of the scp program.
+
+Note that C<scp> will not generate advance reports unless its stdout
+stream is attached to a tty.
 
 =back
 

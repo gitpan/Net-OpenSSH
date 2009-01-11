@@ -1,5 +1,10 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.16  Jan 11, 2009
+        - add support for bwlimit, copy_attrs, stderr_fh, stdout_fh
+          and stderr_to_stdout to scp methods
+	- correct bug in option checking for spawn and open2
+
 0.15  Jan 9, 2009
         - do not escape dots when quoting args
 	- some shell quoting tests added
