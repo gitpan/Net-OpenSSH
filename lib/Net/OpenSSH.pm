@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.16';
+our $VERSION = '0.17';
 
 use strict;
 use warnings;
@@ -115,6 +115,10 @@ sub new {
     my $target_os = delete $opts{target_os};
     $target_os = 'unix' unless defined $target_os;
 
+    my $default_stdout_fh = delete $opts{default_stdout_fh};
+    my $default_stderr_fh = delete $opts{default_stdout_fh};
+    my $default_stdin_fh = delete $opts{default_stdin_fh};
+
     _croak_bad_options %opts;
 
     my @master_opts;
@@ -143,9 +147,16 @@ sub new {
                  _port => $port,
                  _passwd => $obfuscate->($passwd),
                  _timeout => $timeout,
-                 _home => eval { Cwd::realpath((getpwuid $>)[7]) },
+                 _home => do {
+		     local $SIG{__DIE__};
+		     local $SIG{__WARN__};
+		     local $@;
+		     eval { Cwd::realpath((getpwuid $>)[7]) } },
                  _ssh_opts => \@ssh_opts,
 		 _master_opts => \@master_opts,
+		 _default_stdin_fh => $default_stdin_fh,
+		 _default_stdout_fh => $default_stdout_fh,
+		 _default_stderr_fh => $default_stderr_fh,
 		 _target_os => $target_os };
     bless $self, $class;
 
@@ -286,6 +297,8 @@ sub _connect {
     unless ($pid) {
         $mpty->make_slave_controlling_terminal if $mpty;
         my @call = $self->_make_call([@{$self->{_master_opts}}, '-xMN']);
+	local $SIG{__DIE__};
+	local $SIG{__WARN__};
         eval { exec @call };
         POSIX::_exit(255);
     }
@@ -431,8 +444,12 @@ my %loaded_module;
 sub _load_module {
     my $module = shift;
     $loaded_module{$module} ||= do {
-        eval "require $module; 1"
-            or croak "unable to load Perl module $module";
+	do {
+	    local $SIG{__DIE__};
+	    local $SIG{__WARN__};
+	    local $@;
+	    eval "require $module; 1"
+	} or croak "unable to load Perl module $module";
         1
     }
 }
@@ -440,6 +457,7 @@ sub _load_module {
 sub _arg_quoter {
     sub {
         my $arg = shift;
+	return "''" if $arg eq '';
         $arg =~ s|([^\w/\-.])|\\$1|g;
         $arg
     }
@@ -535,8 +553,11 @@ sub open_ex {
         $win = IO::Pty->new;
         $rin = $win->slave;
     }
-    else {
+    elsif (defined $stdin_fh) {
         $rin = $stdin_fh;
+    }
+    else {
+	$rin = $self->{_default_stdin_fh}
     }
     _check_is_system_fh STDIN => $rin;
 
@@ -546,8 +567,11 @@ sub open_ex {
     elsif ($stdout_pty) {
         $wout = $rin;
     }
-    else {
+    elsif (defined $stdout_fh) {
         $wout = $stdout_fh;
+    }
+    else {
+	$wout = $self->{_default_stdout_fh};
     }
     _check_is_system_fh STDOUT => $wout;
 
@@ -557,6 +581,9 @@ sub open_ex {
 	}
 	elsif (defined $stderr_fh) {
 	    $werr = $stderr_fh;
+	}
+	else {
+	    $werr = $self->{_default_stderr_fh};
 	}
 	_check_is_system_fh STDERR => $werr;
     }
@@ -960,7 +987,7 @@ sub _scp {
 	    }
 	    return 1;
 	}
-	if ($! == eval { Errno::ECHILD() }) {
+	if ($! == Errno::ECHILD) {
 	    $self->_set_error(OSSH_SLAVE_SCP_FAILED, "scp operation failed: $!");
 	    return undef
 	}
@@ -1056,7 +1083,7 @@ sub _rsync {
 	    }
 	    return 1;
 	}
-	if ($! == eval { Errno::ECHILD() }) {
+	if ($! == Errno::ECHILD) {
 	    $self->_set_error(OSSH_SLAVE_RSYNC_FAILED, "rsync operation failed: $!");
 	    return undef
 	}
@@ -1336,6 +1363,28 @@ master connection. For instance:
   my $ssh = Net::OpenSSH->new($host,
       master_opts => [-o => "ProxyCommand corkscrew httpproxy 8080 $host"]);
 
+=item default_stdin_fh => $fh
+
+=item default_stdout_fh => $fh
+
+=item default_stderr_fh => $fh
+
+Default I/O streams for open_ex and derived methods (currently, that
+means any method but C<system>, C<pipe_in> and C<pipe_out> and I plan
+to remove that exceptions soon!).
+
+For instance:
+
+  open my $stderr_fh, '>>', '/tmp/$host.err' or die ...;
+  open my $stdout_fh, '>>', '/tmp/$host.log' or die ...;
+
+  my $ssh = Net::OpenSSH->new($host, default_stderr_fh => $stderr_fh,
+                                     default_stdout_fh => $stdout_fh);
+  $ssh->error and die "SSH connection failed: " . $ssh->error;
+
+  $ssh->scp_put("/foo/bar*", "/tmp")
+    or die "scp failed: " . $ssh->error;
+
 =back
 
 =item $ssh->error
@@ -1385,9 +1434,9 @@ the remote process. The writing side is returned as the first value.
 Similar to C<stdin_pipe>, but instead of a regular pipe it uses a
 pseudo-tty (pty).
 
-Note that on some OSs (i.e. HP-UX), ttys are not reliable. They can be
-overflowed when large chunks are written or when data is written
-faster than it is read.
+Note that on some OSs (i.e. HP-UX, AIX), ttys are not reliable. They
+can be overflowed when large chunks are written or when data is
+written faster than read.
 
 =item stdin_fh => $fh
 
@@ -1689,7 +1738,6 @@ For instance:
                   '/remote/dir', '/local/dir');
 
 
-
 =item $sftp = $ssh->sftp
 
 Creates a new L<Net::SFTP::Foreign> object for SFTP interaction that
@@ -1793,6 +1841,30 @@ the corresponding debug flag:
 
   $Net::OpenSSH::debug |= 16;
 
+=head1 FAQ
+
+=over 4
+
+=item Remote command exit status
+
+B<Question>: I use C<$ssh-E<gt>spawn> to asyncronously run compile
+jobs on slave machines. The Net::OpenSSH objects where compilation
+failed does not show error with $ssh->error. Is $ssh->error supposed
+to work in this case?
+
+B<Answer>: C<$ssh-E<gt>error> is only about the SSH layer. Exit codes
+for the remote commands are available in C<$?> (see L<perlfunc/system>
+and L<perlipc>).
+
+For instance:
+
+  my $pid = $ssh->spawn('gcc test.c');
+  $ssh->error and die "unable to start compilation job: ". $ssh->error;
+  ...
+  waitpid($pid, 0);
+  my $exit = ($? >> 8);
+  $exit == 0 or die "compilation failed with code $exit"; 
+
 =head1 SEE ALSO
 
 OpenSSH client documentation: L<ssh(1)>, L<ssh_config(5)>.
@@ -1842,9 +1914,13 @@ people can also find them.
 
 - better timeout handling in capture methods
 
-- add support for more target OSs (quoting)
+- add support for more target OSs (quoting, OpenVMS, Windows & others)
 
 - add tests for scp and rsync methods
+
+- make C<pipe_in>, C<pipe_out> and C<system> methods C<open_ex> based
+
+- write some kind of parallel queue manager module
 
 Send your feature requests, ideas or any feedback, please!
 
