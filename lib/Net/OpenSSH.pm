@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.18';
+our $VERSION = '0.19';
 
 use strict;
 use warnings;
@@ -134,8 +134,8 @@ sub new {
     }
 
     my @ssh_opts;
-    push @ssh_opts, -o => "User $user" if defined $user;
-    push @ssh_opts, -o => "Port $port" if defined $port;
+    push @ssh_opts, -o => "User=$user" if defined $user;
+    push @ssh_opts, -o => "Port=$port" if defined $port;
 
     my $self = { _error => 0,
                  _ssh_cmd => $ssh_cmd,
@@ -244,11 +244,23 @@ sub _make_scp_call {
     my $self = shift;
     my @before = @{shift || []};
     my @args = ($self->_scp_cmd, @before,
-		-o => "ControlPath $self->{_ctl_path}",
+		-o => "ControlPath=$self->{_ctl_path}",
                 @{$self->{_ssh_opts}}, '--', @_);
 
     $debug and $debug & 8 and _debug_dump 'scp call args' => \@args;
     @args;
+}
+
+sub _rsync_quote {
+    my ($self, @args) = @_;
+    for (@args) {
+	if (/['"\s]/) {
+	    s/"/""/g;
+	    $_ = qq|"$_"|;
+	}
+	s/%/%%/;
+    }
+    @args
 }
 
 sub _make_rsync_call {
@@ -256,8 +268,7 @@ sub _make_rsync_call {
     my $before = shift;
     my @ssh_args = $self->_make_call($before);
     pop @ssh_args; # rsync adds the target host itself
-    my $transport = join(' ', $self->shell_quote(@ssh_args));
-    $transport =~ s/%/%%/g;
+    my $transport = join(' ', $self->_rsync_quote(@ssh_args));
     my @args = ( $self->{_rsync_cmd},
 		 -e => $transport,
 		 @_);
@@ -491,6 +502,10 @@ sub _quote_args {
 
 sub shell_quote {
     shift->_quote_args({quote_args => 1}, @_);
+}
+
+sub shell_quote_glob {
+    shift->_quote_args({quote_args => 1, glob_quoting => 1}, @_);
 }
 
 sub _check_is_system_fh {
@@ -1038,11 +1053,13 @@ sub _rsync {
     my $async = delete $opts{async};
     my $verbose = delete $opts{verbose};
     my $quiet = delete $opts{quiet};
+    my $copy_attrs = delete $opts{copy_attrs};
     $quiet = 1 unless (defined $quiet or $verbose);
 
     my @opts = qw(--blocking-io) ;
     push @opts, '-q' if $quiet;
     push @opts, '-v' if $verbose;
+    push @opts, '-p' if $copy_attrs;
 
     my %opts_open_ex = ( _cmd => 'rsync',
 			 quote_args => 0 );
@@ -1806,6 +1823,11 @@ their original form when parsed by the remote shell.
 
 Usually this task is done automatically by the module. See "Shell
 quoting" below.
+
+=item $ssh->shell_quote_glob(@args)
+
+This method is like the previous C<shell_quote> but leaves wildcard
+characters unquoted.
 
 =item $ssh->mux_socket_path
 

@@ -1,11 +1,17 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.19  Jan 20, 2009
+	- shell_quote_glob method added
+	- rsync has its own quoting rules (bug report by Niels Larsen)
+	- implement copy_attrs feature for rsync methods (bug report
+          by Niels Larsen)
+
 0.18  Jan 20, 2009
 	- several documentation corrections and improvements
           contributed by Niels Larsen.
 	- add support for open_ex stdout_fh, stderr_fh and
           stderr_to_stdout options to rsync methods (bug report by
-          Niels Larsen).
+          Niels Larsen)
 	- example of asynchronous usage of scp added
 
 0.17  Jan 19, 2009
