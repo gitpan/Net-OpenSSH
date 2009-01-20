@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.17';
+our $VERSION = '0.18';
 
 use strict;
 use warnings;
@@ -315,7 +315,7 @@ sub wait_for_master {
                                             1;
 }
 
-my $wfm_error_prefix = "unable to stablish master ssh connection";
+my $wfm_error_prefix = "unable to establish master SSH connection";
 
 sub _wait_for_master {
     my ($self, $async, $reset) = @_;
@@ -1030,6 +1030,8 @@ my %rsync_error = (1, 'syntax or usage error',
 		   30, 'timeout in data send/receive',
 		   35, 'timeout waiting for daemon connection');
 
+my %rsync_opt_open_ex = map { $_ => 1 } qw(stderr_to_stdout stderr_fh stdout_fh);
+
 sub _rsync {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -1042,26 +1044,32 @@ sub _rsync {
     push @opts, '-q' if $quiet;
     push @opts, '-v' if $verbose;
 
+    my %opts_open_ex = ( _cmd => 'rsync',
+			 quote_args => 0 );
+
     for my $opt (keys %opts) {
 	my $value = $opts{$opt};
 	if (defined $value) {
-	    my $opt1 = $opt;
-	    $opt1 =~ tr/_/-/;
-	    $rsync_opt_forbiden{$opt1} and croak "forbiden rsync option '$opt' used";
-	    if ($rsync_opt_with_arg{$opt}) {
-		push @opts, "--$opt1=$_"
-		    for (ref($value) eq 'ARRAY' ? @$value : $value);
+	    if ($rsync_opt_open_ex{$opt}) {
+		$opts_open_ex{$opt} = $value;
 	    }
 	    else {
-		$value = !$value if $opt1 =~ s/^no-//;
-		push @opts, ($value ? "--$opt1" : "--no-$opt1");
+		my $opt1 = $opt;
+		$opt1 =~ tr/_/-/;
+		$rsync_opt_forbiden{$opt1} and croak "forbiden rsync option '$opt' used";
+		if ($rsync_opt_with_arg{$opt}) {
+		    push @opts, "--$opt1=$_"
+			for (ref($value) eq 'ARRAY' ? @$value : $value);
+		}
+		else {
+		    $value = !$value if $opt1 =~ s/^no-//;
+		    push @opts, ($value ? "--$opt1" : "--no-$opt1");
+		}
 	    }
 	}
     }
 
-    my $pid = $self->open_ex({ _cmd => 'rsync',
-			       quote_args => 0 },
-			     @opts, '--', @_);
+    my $pid = $self->open_ex(\%opts_open_ex, @opts, '--', @_);
     unless (defined $pid) {
 	$self->_set_error(OSSH_SLAVE_RSYNC_FAILED,
 			  "unable to spawn rsync process: " . $self->error);
@@ -1126,7 +1134,7 @@ Net::OpenSSH - Perl SSH client package implemented on top of OpenSSH
 
   my $ssh = Net::OpenSSH->new($host);
   $ssh->error and
-    die "Couldn't stablish SSH connection: ". $ssh->error;
+    die "Couldn't establish SSH connection: ". $ssh->error;
 
   $ssh->system("ls /tmp") == 0 or
     die "remote system command failed with code: " . ($! >> 8);
@@ -1166,12 +1174,12 @@ OpenSSH binary client (C<ssh>).
 =head2 Under the hood
 
 This package is implemented around the multiplexing feature found in
-later versions of OpenSSH. That feature allows reusing a previous SSH
-connection to run new commands (I believe that OpenSSH 4.1 is the
+later versions of OpenSSH. That feature allows reuse of a previous SSH
+connection for running new commands (I believe that OpenSSH 4.1 is the
 first one to provide all the required functionality).
 
 When a new Net::OpenSSH object is created, the OpenSSH C<ssh> client
-is run in master mode stablishing a permanent (actually, for the
+is run in master mode, establishing a permanent (actually, for the
 lifetime of the object) connection to the server.
 
 Then, every time a new operation is requested a new C<ssh> process is
@@ -1180,10 +1188,10 @@ to send the request to the remote side.
 
 =head2 Net::OpenSSH Vs Net::SSH::.* modules
 
-Why should you use Net::OpenSSH instead of any other of the several
-Perl SSH clients available?
+Why should you use Net::OpenSSH instead of any of the other Perl SSH
+clients available?
 
-Well, that's my (biased) opinion:
+Well, this is my (biased) opinion:
 
 L<Net::SSH::Perl> is not well maintained nowadays, requires a bunch of
 modules (some of them very difficult to install) to be acceptably
@@ -1206,13 +1214,13 @@ In comparison, Net::OpenSSH is a pure perl module that doesn't have
 any mandatory dependencies (obviously, besides requiring OpenSSH
 binaries).
 
-Net::OpenSSH has a very perlish interface. Most operation are
-performed in a fashion very similar to that of Perl builtins and
+Net::OpenSSH has a very perlish interface. Most operations are
+performed in a fashion very similar to that of the Perl builtins and
 common modules (i.e. L<IPC::Open2>).
 
 It is also very fast. The overhead introduced by launching a new ssh
-process for every operation is not apreciable (at least on my Linux
-box). The bottleneck is on the latency intrinsic to the protocol, so
+process for every operation is not appreciable (at least on my Linux
+box). The bottleneck is the latency intrinsic to the protocol, so
 Net::OpenSSH is probably as fast as an SSH client can be.
 
 Being based on OpenSSH is also an advantage: a proved, stable, secure
@@ -1221,10 +1229,10 @@ of the SSH protocol is used.
 
 On the other hand, Net::OpenSSH does not work on Windows.
 
-Net::OpenSSH specifically requires OpenSSH SSH client (AFAIK, the
+Net::OpenSSH specifically requires the OpenSSH SSH client (AFAIK, the
 multiplexing feature is not available from any other SSH
-client). Though, note that it will interacturate with any server
-software, not just servers running OpenSSH C<sshd>.
+client). However, note that it will interact with any server software,
+not just servers running OpenSSH C<sshd>.
 
 For password authentication, L<IO::Pty> has to be installed. Other
 modules and binaries are also required to implement specific
@@ -1233,9 +1241,9 @@ L<rsync(1)>).
 
 =head1 API
 
-Several of the methods on this package accept as first argument a
-reference to a hash containing optional parameters (C<\%opts>) that
-can be omitted. For instance, these two method calls are equivalent:
+Several of the methods in this package accept as first argument an
+optional reference to a hash containing parameters (C<\%opts>). For
+instance, these two method calls are equivalent:
 
   my $out1 = $ssh->capture(@cmd);
   my $out2 = $ssh->capture({}, @cmd);
@@ -1244,8 +1252,8 @@ can be omitted. For instance, these two method calls are equivalent:
 
 Most methods return undef (or an empty list) to indicate failure.
 
-The method C<error> can always be used to check for errors
-explicitly. For instace:
+The C<error> method can always be used to explicitly check for
+errors. For instace:
 
   my ($output, $errput) = $ssh->capture2({timeout => 1}, "find /");
   $ssh->error and die "ssh failed: " . $ssh->error;
@@ -1261,28 +1269,28 @@ These are the methods provided by the package:
 
 =item Net::OpenSSH->new($host, %opts)
 
-creates a new SSH master connection
+Creates a new SSH master connection
 
-C<$host> can be a hostname or and IP address. It can optionally
-contain also the name of the user, her password and the TCP port
+C<$host> can be a hostname or an IP address. It may also
+contain the name of the user, her password and the TCP port
 number where the server is listening:
 
    my $ssh1 = Net::OpenSSH->new('jack@foo.bar.com');
    my $ssh2 = Net::OpenSSH->new('jack:secret@foo.bar.com:10022');
 
-This method always succeeds returning a new object. Error checking has
-to be performed explicitly afterwards:
+This method always succeeds in returning a new object. Error checking
+has to be performed explicitly afterwards:
 
   my $ssh = Net::OpenSSH->new($host, %opts);
   $ssh->error and die "Can't ssh to $host: " . $ssh->error;
 
-The accepted options are:
+Accepted options:
 
 =over 4
 
 =item user => $user_name
 
-login name
+Login name
 
 =item port => $port
 
@@ -1290,7 +1298,7 @@ TCP port number where the server is running
 
 =item passwd => $passwd
 
-user password to use when loging on the remote side.
+User password for logins on the remote side
 
 Note that using password authentication in automated scripts is a very
 bad idea. When possible, you should use public key authentication
@@ -1298,40 +1306,40 @@ instead.
 
 =item ctl_dir => $path
 
-directory where the SSH master control socket will be created.
+Directory where the SSH master control socket will be created.
 
 This directory and its parents must be writable only by the current
-effective user or root, otherwise, the connection will be aborted to
+effective user or root, otherwise the connection will be aborted to
 avoid insecure operation.
 
 By default C<~/.libnet-openssh-perl> is used.
 
 =item ssh_cmd => $cmd
 
-name or full path to OpenSSH C<ssh> binary. For instance:
+Name or full path to OpenSSH C<ssh> binary. For instance:
 
   my $ssh = Net::OpenSSH->new($host, ssh_cmd => '/opt/OpenSSH/bin/ssh');
 
 =item scp_cmd => $cmd
 
-name or full path to OpenSSH C<scp> binary.
+Name or full path to OpenSSH C<scp> binary.
 
 By default it is inferred from the C<ssh> one.
 
 =item rsync_cmd => $cmd
 
-name or full path to C<rsync> binary. Defaults to C<rsync>.
+Name or full path to C<rsync> binary. Defaults to C<rsync>.
 
 =item timeout => $timeout
 
-maximum acceptable time that can elapse without network traffic or any
-other event happening on methods that are not inmediate (for instance,
-when stablishing the master SSH connection or inside C<capture>
+<aximum acceptable time that can elapse without network traffic or any
+other event happening on methods that are not immediate (for instance,
+when establishing the master SSH connection or inside C<capture>
 method).
 
 =item strict_mode => 0
 
-by default, the connection will be aborted if the path to the socket
+By default, the connection will be aborted if the path to the socket
 used for multiplexing is found to be non-secure (for instance, when
 any of the parent directories is writable by other users).
 
@@ -1339,7 +1347,7 @@ This option can be used to disable that feature. Use with care!!!
 
 =item async => 1
 
-by default, the constructor waits until the multiplexing socket is
+By default, the constructor waits until the multiplexing socket is
 available. That option can be used to defer the waiting until the
 socket is actually used.
 
@@ -1357,7 +1365,7 @@ in parallel:
 
 =item master_opts => [...]
 
-additional options to pass to the ssh command when stablishing the
+Additional options to pass to the C<ssh> command when establishing the
 master connection. For instance:
 
   my $ssh = Net::OpenSSH->new($host,
@@ -1371,7 +1379,7 @@ master connection. For instance:
 
 Default I/O streams for open_ex and derived methods (currently, that
 means any method but C<system>, C<pipe_in> and C<pipe_out> and I plan
-to remove that exceptions soon!).
+to remove those exceptions soon!).
 
 For instance:
 
@@ -1392,14 +1400,15 @@ For instance:
 Returns the error condition for the last performed operation.
 
 The returned value is a dualvar as $! (see L<perlvar/"$!">) that
-renders an informative message when used on string context or an error
-number on numeric context (error codes appear in
+renders an informative message when used in string context or an error
+number in numeric context (error codes appear in
 L<Net::OpenSSH::Constants>).
 
 =item $ssh->system(@cmd)
 
-Similar to C<system> builtin, runs the command C<@cmd> on the remote
-machine using the current stdin, stdout and stderr streams for IO.
+Similar to the C<system> builtin, runs the command C<@cmd> on the
+remote machine using the current stdin, stdout and stderr streams for
+IO.
 
 Example:
 
@@ -1420,14 +1429,15 @@ the new SSH slave process. An empty list is returned on failure.
 Note that C<waitpid> has to be used afterwards to reap the
 slave SSH process.
 
-The accepted options are:
+Accepted options:
 
 =over 4
 
 =item stdin_pipe => 1
 
-creates a new pipe and connects the reading side to the stdin stream of
-the remote process. The writing side is returned as the first value.
+Creates a new pipe and connects the reading side to the stdin stream
+of the remote process. The writing side is returned as the first
+value.
 
 =item stdin_pty => 1
 
@@ -1435,8 +1445,8 @@ Similar to C<stdin_pipe>, but instead of a regular pipe it uses a
 pseudo-tty (pty).
 
 Note that on some OSs (i.e. HP-UX, AIX), ttys are not reliable. They
-can be overflowed when large chunks are written or when data is
-written faster than read.
+can overflow when large chunks are written or when data is
+written faster than it is read.
 
 =item stdin_fh => $fh
 
@@ -1541,34 +1551,36 @@ No options are currently accepted.
 
 =item ($pty, $err, $pid) = $ssh->open3pty(\%opts, @cmd)
 
-Shortuts around C<open_ex> method.
+Shortcuts around C<open_ex> method.
 
 =item $pid = $ssh->spawn(\%opts, @_)
 
 Another C<open_ex> shortcut, it launches a new remote process in the
 background and returns its PID.
 
-For instance, you can run some command in several host in parallel
+For instance, you can run some command on several host in parallel
 with the following code:
 
   my %conn = map { $_ => Net::OpenSSH->new($_) } @hosts;
+  my @pid;
   for my $host (@hosts) {
       open my($fh), '>', "/tmp/out-$host.txt"
         or die "unable to create file: $!;
-      $conn{$host}->spawn({stdout_fh => $fh}, $cmd);
+      push @pid, $conn{$host}->spawn({stdout_fh => $fh}, $cmd);
   }
-  1 while wait != -1;
+
+  waitpid($_, 0) for @pid;
 
 =item $output = $ssh->capture(\%opts, @cmd);
 
 =item @output = $ssh->capture(\%opts, @cmd);
 
-This method is conceptually equivalent to perl backquote operator
-(i.e. C<`ls`>) running the command on the remote machine and capturing
+This method is conceptually equivalent to the perl backquote operator
+(i.e. C<`ls`>): it runs the command on the remote machine and captures
 its output.
 
-On scalar context returns the output as an scalar. In list context
-returns the output broken in lines (it honors C<$/>, see
+In scalar context returns the output as a scalar. In list context
+returns the output broken into lines (it honors C<$/>, see
 L<perlvar/"$/">).
 
 When an error happens while capturing (for instance, the operation
@@ -1582,33 +1594,33 @@ method. For instance:
       warn "operation didn't complete successfully: ". $ssh->error;
   print $output;
 
-The accepted options are as follows:
+Accepted options:
 
 =over 4
 
 =item stderr_to_stdout => $bool
 
-redirect stderr to stdout. Both streams will be captured on the same
+Redirect stderr to stdout. Both streams will be captured on the same
 scalar interleaved.
 
 =item stderr_fh => $fh
 
-attachs the remote command stderr stream to the given file handle.
+Attaches the remote command stderr stream to the given file handle.
 
 =item stdin_data => $input
 
 =item stdin_data => \@input
 
-sends the given data to the stdin stream while simultaneously
-capturing the output.
+Sends the given data to the stdin stream while capturing the output on
+stdout.
 
 =item stdin_fh => $fh
 
-attachs the remote command stdin stream to the given file handle.
+Attaches the remote command stdin stream to the given file handle.
 
 =item timeout => $timeout
 
-The operation is aborted after C<$timeout> seconds elapse without
+The operation is aborted after C<$timeout> seconds elapsed without
 network activity.
 
 As the Secure Shell protocol does not support signalling remote
@@ -1649,12 +1661,12 @@ network activity.
 
 =item $ssh->scp_put(\%opts, $local, $local2,..., $remote_dir_or_file)
 
-These two methods are wrappers around the C<scp> command that allow to
-transfer files to/from the remote host reusing the existant SSH master
-connection.
+These two methods are wrappers around the C<scp> command that allow
+transfers of files to/from the remote host using the existing SSH
+master connection.
 
 When transferring several files, the target argument must point to an
-existant directory. If only one file is to be transferred, the target
+existing directory. If only one file is to be transferred, the target
 argument can be a directory or a file name or can be ommited. For
 instance:
 
@@ -1664,15 +1676,15 @@ instance:
 Both C<scp_get> and C<scp_put> methods return a true value when all
 the files are transferred correctly, otherwise they return undef.
 
-The accepted options are:
+Accepted options:
 
 =over 4
 
 =item quiet => 0
 
-By default, C<scp> is called with the quite flag C<-q> enabled in
-order to suppress any progress information. This option allows to
-reenable the progress indication bar.
+By default, C<scp> is called with the quiet flag C<-q> enabled in
+order to suppress progress information. This option allows reenabling
+the progress indication bar.
 
 =item recursive => 1
 
@@ -1680,8 +1692,8 @@ Copy files and directories recursively.
 
 =item glob => 1
 
-Allow expansion of shell metacharacters on the sources list so that
-willcards can be used to select files.
+Allow expansion of shell metacharacters in the sources list so that
+wildcards can be used to select files.
 
 =item glob_flags => $flags
 
@@ -1700,7 +1712,35 @@ Limits the used bandwith, specified in Kbit/s.
 =item async => 1
 
 Doesn't wait for the C<scp> command to finish. When this option is
-used the method returns the PID of the child C<scp> process.
+used, the method returns the PID of the child C<scp> process.
+
+For instance, it is possible to transfer files to several hosts in
+parallel as follows:
+
+  use Errno;
+
+  my (%pid, %ssh);
+  for my $host (@hosts) {
+    $ssh{$host} = Net::OpenSSH->new($host, async => 1);
+  }
+  
+  for my $host (@hosts) {
+    $pid{$host} = $ssh{$host}->scp_put({async => 1}, $local_fn, $remote_fn)
+      or warn "scp_put to $host failed: " . $ssh{$host}->error . "\n";
+  }
+  
+  for my $host (@hosts) {
+    if (my $pid = $pid{$host}) {
+      if (waitpit($pid, 0) > 0) {
+        my $exit = ($? >> 8);
+        $exit and warn "transfer of file to $host failed ($exit)\n";
+      }
+      else {
+        redo if ($! == EINTR);
+        warn "waitpid($pid) failed: $!\n";
+      }
+    }
+  }
 
 =item stdout_fh => $fh
 
@@ -1708,10 +1748,10 @@ used the method returns the PID of the child C<scp> process.
 
 =item stderr_to_stdout => 1
 
-These options are passed unchanged to method C<open_ex>, allowing to
-capture the output of the scp program.
+These options are passed unchanged to method C<open_ex>, allowing
+capture of the output of the scp program.
 
-Note that C<scp> will not generate advance reports unless its stdout
+Note that C<scp> will not generate progress reports unless its stdout
 stream is attached to a tty.
 
 =back
@@ -1745,8 +1785,8 @@ runs through the ssh master connection.
 
 =item $ssh->wait_for_master($async)
 
-When the connection has been stablished calling the constructor with
-the C<async> option, this call allows to advance the process.
+When the connection has been established by calling the constructor
+with the C<async> option, this call allows to advance the process.
 
 If C<$async> is true, it will perform any work that can be done
 inmediately without waiting (for instance, entering the password or
@@ -1755,13 +1795,13 @@ return. If a false value is given, it will finalize the connection
 process and wait until the multiplexing socket is available.
 
 It returns a true value after the connection has been succesfully
-stablished or false if the connection process fails or if it has not
-yet completed (C<$ssh-E<gt>error> can be used to differentiate between
-both cases).
+established. False is returned if the connection process fails or if
+it has not yet completed (C<$ssh-E<gt>error> can be used to
+distinguish between those cases).
 
 =item $ssh->shell_quote(@args)
 
-return the list of arguments quoted so that they will be restored to
+Returns the list of arguments quoted so that they will be restored to
 their original form when parsed by the remote shell.
 
 Usually this task is done automatically by the module. See "Shell
@@ -1789,7 +1829,7 @@ L<perlfunc/system>:
   to the system's command shell for parsing (this is "/bin/sh -c" on
   Unix platforms, but varies on other platforms).
 
-Taken for example Net::OpenSSH C<system> method:
+Take for example Net::OpenSSH C<system> method:
 
   $ssh->system("ls -l *");
   $ssh->system('ls', '-l', '/');
@@ -1798,13 +1838,13 @@ The first call passes the argument unchanged to ssh, so that it is
 executed in the remote side through the shell which interprets shell
 metacharacters.
 
-The second call escapes especial shell characters, so that,
+The second call escapes especial shell characters so that,
 effectively, it is equivalent to calling the command directly and not
 through the shell.
 
-Under the hood, as the Secure Shell protocol does not have provision
-for this mode of operation and always spawns a new shell where it runs
-the given command, Net::OpenSSH quotes any shell metacharacters in the
+Under the hood, as the Secure Shell protocol does not provide for this
+mode of operation and always spawns a new shell where it runs the
+given command, Net::OpenSSH quotes any shell metacharacters in the
 comand list.
 
 All the methods that invoke a remote command (system, open_ex, etc.)
@@ -1831,11 +1871,11 @@ arguments and leave others untouched:
                "/tmp/files_*.dat");
 
 When the glob option is set in scp and rsync file transfer methods, an
-alternative quoting method that knows about file willcards and pass
-them unquoted is used. The set of willcards recognized currently is
+alternative quoting method that knows about file wildcards and passes
+them unquoted is used. The set of wildcards recognized currently is
 the one supported by L<bash(1)>.
 
-As shell quoting is a tricky matter, I expect bugs to pop up in this
+As shell quoting is a tricky matter, I expect bugs to appear in this
 area. You can see how C<ssh> is called, and the quoting used setting
 the corresponding debug flag:
 
@@ -1864,6 +1904,8 @@ For instance:
   waitpid($pid, 0);
   my $exit = ($? >> 8);
   $exit == 0 or die "compilation failed with code $exit"; 
+
+=back
 
 =head1 SEE ALSO
 
