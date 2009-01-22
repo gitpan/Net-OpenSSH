@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.21';
+our $VERSION = '0.22';
 
 use strict;
 use warnings;
@@ -94,7 +94,19 @@ sub new {
     my $target = delete $opts{host};
 
     my ($user, $passwd, $host, $port) =
-        $target =~ /^\s*(?:([^\@:]+)(?::(.*))?\@)?(\[[\da-f]{0,4}(?::{1,2}[\d\da-f]{1,4})+\]|[^\[\]\@:]+)(?::([^\@:]+))?\s*$/i
+        $target =~ m{^
+                    \s*               # space
+                    ( ?:([^\@:]+)     # username
+                     (?::(.*))?       # : password
+                     \@) ?            # @
+                    (                 # host...
+                     \[(?:::)?[\da-f]{1,4}(?:::?[\da-f]{1,4}){0,7}(?:::)?\] # [ipv6]
+                     |                # or
+                     [^\[\]\@:]+      # hostname / ipv4
+                    )
+                    (?::([^\@:]+))?   # port
+                    \s*               # space
+                   $}ix
             or croak "bad host/target '$target' specification";
 
     my ($ipv6, $ssh_host);

@@ -1,5 +1,8 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.22  Jan 22, 2009
+        - use better regexp for IPv6 addresses
+
 0.21  Jan 22, 2009
         - recognize IPv6 addresses (bug report by Ryan Kruse).
 
