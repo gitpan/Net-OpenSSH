@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.20';
+our $VERSION = '0.21';
 
 use strict;
 use warnings;
@@ -94,8 +94,17 @@ sub new {
     my $target = delete $opts{host};
 
     my ($user, $passwd, $host, $port) =
-        $target =~ /^\s*(?:([^\@:]+)(?::(.*))?\@)?([^\@:]+)(?::([^\@:]+))?\s*$/
+        $target =~ /^\s*(?:([^\@:]+)(?::(.*))?\@)?(\[[\da-f]{0,4}(?::{1,2}[\d\da-f]{1,4})+\]|[^\[\]\@:]+)(?::([^\@:]+))?\s*$/i
             or croak "bad host/target '$target' specification";
+
+    my ($ipv6, $ssh_host);
+    if ($host =~ /^\[(.*)\]$/) {
+	$ssh_host = $1;
+	$ipv6 = 1;
+    }
+    else {
+	$ssh_host = $host;
+    }
 
     $user = delete $opts{user} unless defined $user;
     $port = delete $opts{port} unless defined $port;
@@ -143,6 +152,8 @@ sub new {
 		 _rsync_cmd => $rsync_cmd,
                  _pid => undef,
                  _host => $host,
+		 _ssh_host => $ssh_host,
+		 _ipv6 => $ipv6,
                  _user => $user,
                  _port => $port,
                  _passwd => $obfuscate->($passwd),
@@ -229,7 +240,7 @@ sub _make_call {
     my @before = @{shift || []};
     my @args = ($self->{_ssh_cmd}, @before,
 		-S => $self->{_ctl_path},
-                @{$self->{_ssh_opts}}, '--', $self->{_host},
+                @{$self->{_ssh_opts}}, '--', $self->{_ssh_host},
                 (@_ ? "@_" : ()));
     $debug and $debug & 8 and _debug_dump 'call args' => \@args;
     @args;
@@ -1297,6 +1308,10 @@ number where the server is listening:
 
    my $ssh1 = Net::OpenSSH->new('jack@foo.bar.com');
    my $ssh2 = Net::OpenSSH->new('jack:secret@foo.bar.com:10022');
+
+IPv6 addresses have to be enclosed in square brackets. For instance:
+
+  my $ssh3 = Net::OpenSSH->new('jsmith@[::1]:1022');
 
 This method always succeeds in returning a new object. Error checking
 has to be performed explicitly afterwards:
