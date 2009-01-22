@@ -1,5 +1,12 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.20  Jan 22, 2009
+	- default_stderr_fh was wrongly handled (bug report by Sawyer
+          X).
+	- add getters for user, host and port properties (feature
+          request by Niels Larsen)
+	- doc errors corrected
+
 0.19  Jan 20, 2009
 	- shell_quote_glob method added
 	- rsync has its own quoting rules (bug report by Niels Larsen)

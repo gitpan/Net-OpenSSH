@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.19';
+our $VERSION = '0.20';
 
 use strict;
 use warnings;
@@ -116,7 +116,7 @@ sub new {
     $target_os = 'unix' unless defined $target_os;
 
     my $default_stdout_fh = delete $opts{default_stdout_fh};
-    my $default_stderr_fh = delete $opts{default_stdout_fh};
+    my $default_stderr_fh = delete $opts{default_stderr_fh};
     my $default_stdin_fh = delete $opts{default_stdin_fh};
 
     _croak_bad_options %opts;
@@ -201,6 +201,10 @@ sub new {
     $self->_connect;
     $self;
 }
+
+sub get_user { shift->{_user} }
+sub get_host { shift->{_host} }
+sub get_port { shift->{_port} }
 
 sub _is_secure_path {
     my ($self, $path) = @_;
@@ -1139,7 +1143,6 @@ sub DESTROY {
 
 1;
 __END__
-# Below is stub documentation for your module. You'd better edit it!
 
 =head1 NAME
 
@@ -1154,7 +1157,7 @@ Net::OpenSSH - Perl SSH client package implemented on top of OpenSSH
     die "Couldn't establish SSH connection: ". $ssh->error;
 
   $ssh->system("ls /tmp") == 0 or
-    die "remote system command failed with code: " . ($! >> 8);
+    die "remote system command failed with code: " . ($? >> 8);
 
   my @ls = $ssh->capture("ls");
   $ssh->error and
@@ -1420,6 +1423,14 @@ The returned value is a dualvar as $! (see L<perlvar/"$!">) that
 renders an informative message when used in string context or an error
 number in numeric context (error codes appear in
 L<Net::OpenSSH::Constants>).
+
+=item $ssh->get_user
+
+=item $ssh->get_host
+
+=item $ssh->get_port
+
+Return the corresponding SSH login parameters.
 
 =item $ssh->system(@cmd)
 
