@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.22';
+our $VERSION = '0.23';
 
 use strict;
 use warnings;
@@ -86,6 +86,9 @@ my $obfuscate = sub {
 };
 my $deobfuscate = $obfuscate;
 
+# regexp from Regexp::IPv6
+my $IPv6_re = qr{:(?::[\da-f]{1,4}){0,5}(?:(?::[\da-f]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})))|[\da-f]{1,4}:(?:[\da-f]{1,4}:(?:[\da-f]{1,4}:(?:[\da-f]{1,4}:(?:[\da-f]{1,4}:(?:[\da-f]{1,4}:(?:[\da-f]{1,4}:(?:[\da-f]{1,4}|:)|:(?:[\da-f]{1,4})?)|(?:(?::[\da-f]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))?))|(?::[\da-f]{1,4})?(?:(?::[\da-f]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))?))|(?::[\da-f]{1,4}){0,2}(?:(?::[\da-f]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))?))|(?::[\da-f]{1,4}){0,3}(?:(?::[\da-f]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))?))|(?::[\da-f]{1,4}){0,4}(?:(?::[\da-f]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))?))}i;
+
 sub new {
     my $class = shift;
     @_ & 1 and unshift @_, 'host';
@@ -93,29 +96,35 @@ sub new {
 
     my $target = delete $opts{host};
 
-    my ($user, $passwd, $host, $port) =
+    my ($user, $passwd, $ipv6, $host, $port) =
         $target =~ m{^
                     \s*               # space
-                    ( ?:([^\@:]+)     # username
-                     (?::(.*))?       # : password
-                     \@) ?            # @
-                    (                 # host...
-                     \[(?:::)?[\da-f]{1,4}(?:::?[\da-f]{1,4}){0,7}(?:::)?\] # [ipv6]
-                     |                # or
-                     [^\[\]\@:]+      # hostname / ipv4
+                    (?:
+                      ([^\@:]+)       # username
+                      (?::(.*))?      # : password
+                      \@              # @
+                    )?
+                    (?:               # host
+                       (              #   IPv6...
+                         \[$IPv6_re\] #     [IPv6]
+                         |            #     or
+                         $IPv6_re     #     IPv6
+                       )
+                       |              #   or
+                       ([^\[\]\@:]+)  #   hostname / ipv4
                     )
                     (?::([^\@:]+))?   # port
                     \s*               # space
                    $}ix
             or croak "bad host/target '$target' specification";
 
-    my ($ipv6, $ssh_host);
-    if ($host =~ /^\[(.*)\]$/) {
-	$ssh_host = $1;
-	$ipv6 = 1;
+    my $host_ssh;
+    if (defined $ipv6) {
+	($host_ssh) = $ipv6 =~ /^\[?(.*?)\]?$/;
+	$host = "[$host_ssh]";
     }
     else {
-	$ssh_host = $host;
+	$host_ssh = $host;
     }
 
     $user = delete $opts{user} unless defined $user;
@@ -164,8 +173,7 @@ sub new {
 		 _rsync_cmd => $rsync_cmd,
                  _pid => undef,
                  _host => $host,
-		 _ssh_host => $ssh_host,
-		 _ipv6 => $ipv6,
+		 _host_ssh => $host_ssh,
                  _user => $user,
                  _port => $port,
                  _passwd => $obfuscate->($passwd),
@@ -252,7 +260,7 @@ sub _make_call {
     my @before = @{shift || []};
     my @args = ($self->{_ssh_cmd}, @before,
 		-S => $self->{_ctl_path},
-                @{$self->{_ssh_opts}}, '--', $self->{_ssh_host},
+                @{$self->{_ssh_opts}}, '--', $self->{_host_ssh},
                 (@_ ? "@_" : ()));
     $debug and $debug & 8 and _debug_dump 'call args' => \@args;
     @args;
@@ -504,7 +512,7 @@ sub _arg_quoter {
 sub _arg_quoter_glob {
     sub {
 	my $arg = shift;
-        $arg =~ s|(?<!\\)([^\w/\-+=*?\[\],{}:\@!.^\\])|\\$1|g;
+        $arg =~ s|(?<!\\)([^\w/\-+=*?\[\],{}:\@!.^\\~])|\\$1|g;
 	$arg;
     }
 }
@@ -1320,10 +1328,11 @@ number where the server is listening:
 
    my $ssh1 = Net::OpenSSH->new('jack@foo.bar.com');
    my $ssh2 = Net::OpenSSH->new('jack:secret@foo.bar.com:10022');
+   my $ssh3 = Net::OpenSSH->new('jsmith@2001:db8::1428:57ab'); # IPv6
 
-IPv6 addresses have to be enclosed in square brackets. For instance:
+IPv6 addresses may optionally be enclosed in brackets:
 
-  my $ssh3 = Net::OpenSSH->new('jsmith@[::1]:1022');
+   my $ssh4 = Net::OpenSSH->new('jsmith@[::1]:1022');
 
 This method always succeeds in returning a new object. Error checking
 has to be performed explicitly afterwards:
@@ -1402,13 +1411,16 @@ For instance, the following code connects to several remote machines
 in parallel:
 
   my (%ssh, %ls);
+  
+  # multiple connections are stablished in parallel:
   for my $host (@hosts) {
       $ssh{$host} = Net::OpenSSH->new($host, async => 1);
   }
+  
+  # then to run some command in all the host (sequentially):
   for my $host (@hosts) {
       $ssh{$host}->system('ls /');
   }
-}
 
 =item master_opts => [...]
 
