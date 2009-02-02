@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.25';
+our $VERSION = '0.26';
 
 use strict;
 use warnings;
@@ -51,8 +51,7 @@ sub _hexdump {
             my $good = $good{(caller 1)[3]};
             my @keys = ( $good ? grep !$good->{$_}, keys %$opts : keys %$opts);
             if (@keys) {
-                my $s = (@keys > 1 ? 's' : '');
-                croak "Invalid or bad combination of option$s ('" . CORE::join("', '", @keys) . "')";
+                croak "Invalid or bad combination of options ('" . CORE::join("', '", @keys) . "')";
             }
         }
     }
@@ -151,6 +150,12 @@ sub new {
     my $target_os = delete $opts{target_os};
     $target_os = 'unix' unless defined $target_os;
 
+    my $master_stdout_fh = delete $opts{master_stdout_fh};
+    my $master_stderr_fh = delete $opts{master_stderr_fh};
+
+    my $master_stdout_discard = delete $opts{master_stdout_discard};
+    my $master_stderr_discard = delete $opts{master_stderr_discard};
+
     my $default_stdout_fh = delete $opts{default_stdout_fh};
     my $default_stderr_fh = delete $opts{default_stderr_fh};
     my $default_stdin_fh = delete $opts{default_stdin_fh};
@@ -190,10 +195,14 @@ sub new {
 		     local $@;
 		     eval { Cwd::realpath((getpwuid $>)[7]) } },
                  _ssh_opts => \@ssh_opts,
-		 _master_opts => \@master_opts,
 		 _default_stdin_fh => $default_stdin_fh,
 		 _default_stdout_fh => $default_stdout_fh,
 		 _default_stderr_fh => $default_stderr_fh,
+		 _master_opts => \@master_opts,
+		 _master_stdout_fh => $master_stdout_fh,
+		 _master_stderr_fh => $master_stderr_fh,
+		 _master_stdout_discard => $master_stdout_discard,
+		 _master_stderr_discard => $master_stderr_discard,
 		 _target_os => $target_os };
     bless $self, $class;
 
@@ -340,6 +349,35 @@ sub _kill_master {
     }
 }
 
+sub _check_is_system_fh {
+    my ($name, $fh) = @_;
+    my $fn = fileno(defined $fh ? $fh : $name);
+    defined $fn and $fn >= 0 and return;
+    croak "child process $name is not a real system file handle";
+}
+
+sub _master_redirect {
+    my $self = shift;
+    my $uname = uc shift;
+    my $name = lc $uname;
+
+    no strict 'refs';    
+    if ($self->{"_master_${name}_discard"}) {
+	open *$uname, '>>', '/dev/null';
+    }
+    else {
+	my $fh = $self->{"_master_${name}_fh"};
+	$fh = $self->{"_default_${name}_fh"} unless defined $fh;
+	if (defined $fh) {
+	    _check_is_system_fh $uname => $fh;
+	    
+	    if (fileno $fh != fileno *$uname) {
+		open *$uname, '>>&', $fh or POSIX::_exit(255);
+	    }
+	}
+    }
+}
+
 sub _connect {
     my ($self, $async) = @_;
     $self->_set_error;
@@ -350,6 +388,8 @@ sub _connect {
         $self->{_mpty} = $mpty = IO::Pty->new;
     }
 
+    my @call = $self->_make_call([@{$self->{_master_opts}}, '-xMN']);
+
     local $SIG{CHLD};
     my $pid = fork;
     unless (defined $pid) {
@@ -358,7 +398,10 @@ sub _connect {
     }
     unless ($pid) {
         $mpty->make_slave_controlling_terminal if $mpty;
-        my @call = $self->_make_call([@{$self->{_master_opts}}, '-xMN']);
+
+	$self->_master_redirect('STDOUT');
+	$self->_master_redirect('STDERR');
+
 	local $SIG{__DIE__};
 	local $SIG{__WARN__};
         eval { exec @call };
@@ -562,7 +605,7 @@ sub _load_module {
 
 sub _arg_quoter {
     sub {
-        my $arg = shift;
+	my $arg = shift;
 	return "''" if $arg eq '';
         $arg =~ s|([^\w/\-.])|\\$1|g;
         $arg
@@ -582,16 +625,30 @@ sub _quote_args {
     my $opts = shift;
     ref $opts eq 'HASH' or die "internal error";
     my $quote = delete $opts->{quote_args};
+    my $quote_extended = delete $opts->{quote_args_extended};
     my $glob_quoting = delete $opts->{glob_quoting};
     $quote = (@_ > 1) unless defined $quote;
+    
     if ($quote) {
 	my $quoter = ($glob_quoting
 		      ? $self->_arg_quoter_glob
 		      : $self->_arg_quoter);
-	wantarray ? map $quoter->($_), @_ : $quoter->($_[0])
+	my @quoted = map $quoter->($_), @_;
+
+	if ($quote_extended) {
+	    push @quoted, '</dev/null' if $opts->{stdin_discard};
+	    if ($opts->{stdout_discard}) {
+		push @quoted, '>/dev/null';
+		push @quoted, '2>&1' if ($opts->{stderr_to_stdout} || $opts->{stderr_discard})
+	    }
+	    else {
+		push @quoted, '2>/dev/null' if $opts->{stderr_discard};
+	    }
+	}
+	wantarray ? @quoted : join(" ", @quoted);
     }
     else {
-	wantarray ? @_ : $_[0]
+	wantarray ? @_ : join(" ", @_);
     }
 }
 
@@ -601,13 +658,6 @@ sub shell_quote {
 
 sub shell_quote_glob {
     shift->_quote_args({quote_args => 1, glob_quoting => 1}, @_);
-}
-
-sub _check_is_system_fh {
-    my ($name, $fh) = @_;
-    my $fn = fileno(defined $fh ? $fh : $name);
-    return if (defined $fn and $fn >= 0);
-    croak "child process $name is not a real system file handle";
 }
 
 sub _array_or_scalar { map { defined($_) ? (ref $_ eq 'ARRAY' ? @$_ : $_ ) : () } @_ }
@@ -638,21 +688,24 @@ sub open_ex {
     $self->_check_master_and_clear_error or return ();
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
 
-    my ($stdin_pipe, $stdin_fh, $stdin_pty);
-    ( $stdin_pipe = delete $opts{stdin_pipe} or
+    my ($stdin_discard, $stdin_pipe, $stdin_fh, $stdin_pty);
+    ( $stdin_discard = delete $opts{stdin_discard} or
+      $stdin_pipe = delete $opts{stdin_pipe} or
       $stdin_pty = delete $opts{stdin_pty} or
       $stdin_fh = delete $opts{stdin_fh} );
 
-    my ($stdout_pipe, $stdout_fh, $stdout_pty);
-    ( $stdout_pipe = delete $opts{stdout_pipe} or
+    my ($stdout_discard, $stdout_pipe, $stdout_fh, $stdout_pty);
+    ( $stdout_discard = delete $opts{stdout_discard} or
+      $stdout_pipe = delete $opts{stdout_pipe} or
       $stdout_pty = delete $opts{stdout_pty} or
       $stdout_fh = delete $opts{stdout_fh} );
 
     $stdout_pty and !$stdin_pty
         and croak "option stdout_pty requires stdin_pty set";
 
-    my ($stderr_pipe, $stderr_fh, $stderr_to_stdout);
-    ( $stderr_pipe = delete $opts{stderr_pipe} or
+    my ($stderr_discard, $stderr_pipe, $stderr_fh, $stderr_to_stdout);
+    ( $stderr_discard = delete $opts{stderr_discard} or
+      $stderr_pipe = delete $opts{stderr_pipe} or
       $stderr_fh = delete $opts{stderr_fh} or
       $stderr_to_stdout = delete $opts{stderr_to_stdout} );
 
@@ -670,8 +723,9 @@ sub open_ex {
 
     my @error_prefix = delete $opts{_error_prefix};
 
-
+    $opts{quote_args_extended} = 1 if (!defined $opts{quote_args_extended} and $cmd eq 'ssh');
     my @args = $self->_quote_args(\%opts, @_);
+
     _croak_bad_options %opts;
 
     my ($rin, $win, $rout, $wout, $rerr, $werr);
@@ -741,6 +795,13 @@ sub open_ex {
 	$werr = $werr_dup;
     }
 
+    my @call = ( $cmd eq 'ssh'   ? $self->_make_call(\@ssh_opts, @args)       :
+		 $cmd eq 'scp'   ? $self->_make_scp_call(\@ssh_opts, @args)   :
+		 $cmd eq 'rsync' ? $self->_make_rsync_call(\@ssh_opts, @args) :
+		 die "internal error: bad _cmd protocol" );
+
+    $debug and $debug & 16 and _debug_dump open_ex => \@call;
+
     my $pid = fork;
     unless (defined $pid) {
         $self->_set_error(OSSH_SLAVE_FAILED,  @error_prefix,
@@ -748,20 +809,29 @@ sub open_ex {
         return ();
     }
     unless ($pid) {
-        if (defined $rin) {
+	if (defined $stdin_discard) {
+	    open STDIN, '<', '/dev/null' or POSIX::_exit(255);
+	}
+        elsif (defined $rin) {
             $rin->make_slave_controlling_terminal if $stdin_pty;
 	    unless (fileno $rin == 0) {
 		open STDIN, '<&', $rin or POSIX::_exit(255);
 	    }
 	    $win and close $win;
         }
-        if (defined $wout) {
+        if ($stdout_discard) {
+	    open STDOUT, '>', '/dev/null' or POSIX::_exit(255);
+	}
+	elsif (defined $wout) {
 	    unless (fileno $wout == 1) {
 		open STDOUT, '>>&', $wout or POSIX::_exit(255);
 	    }
             $rout and close $rout;
         }
-        if (defined $werr) {
+	if ($stderr_discard) {
+	    open STDERR, '>', '/dev/null' or POSIX::_exit(255);
+	}
+        elsif (defined $werr) {
 	    unless (fileno $werr == 2) {
 		open STDERR, '>>&', $werr or POSIX::_exit(255);
 	    }
@@ -770,12 +840,6 @@ sub open_ex {
         elsif ($stderr_to_stdout) {
 	    open STDERR, '>>&STDOUT' or POSIX::_exit(255);
         }
-        my @call = ( $cmd eq 'ssh'   ? $self->_make_call(\@ssh_opts, @args)       :
-		     $cmd eq 'scp'   ? $self->_make_scp_call(\@ssh_opts, @args)   :
-		     $cmd eq 'rsync' ? $self->_make_rsync_call(\@ssh_opts, @args) :
-		     die "internal error: bad _cmd protocol" );
-
-        $debug and $debug & 16 and _debug_dump open_ex => \@call;
         do { exec @call };
         POSIX::_exit(255);
     }
@@ -900,8 +964,8 @@ sub _io3 {
     return ($bout, $berr);
 }
 
-_sub_options spawn => qw(stderr_to_stdout stdin_fh stdout_fh
-                         stderr_fh quote_args tty ssh_opts);
+_sub_options spawn => qw(stderr_to_stdout stdin_discard stdin_fh stdout_discard stdout_fh
+                         stderr_discard stderr_fh quote_args tty ssh_opts);
 sub spawn {
     my $self = shift;
     my %opts =  (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -924,7 +988,7 @@ sub open2 {
     return ($in, $out, $pid);
 }
 
-_sub_options open2pty => qw(stderr_to_stdout stderr_fh
+_sub_options open2pty => qw(stderr_to_stdout stderr_discard stderr_fh
                             quote_args tty close_slave_pty ssh_opts);
 sub open2pty {
     my $self = shift;
@@ -966,13 +1030,15 @@ sub open3pty {
     return ($pty, $err, $pid);
 }
 
-_sub_options system => qw(stderr_to_stdout stdout_fh stdin_fh stderr_fh quote_args tty ssh_opts);
+_sub_options system => qw(stdout_discard stdout_fh stdin_discard stdin_fh quote_args
+                          stderr_to_stdout stderr_discard stderr_fh tty ssh_opts);
 sub system {
     my $self = shift;
     $self->_check_master_and_clear_error or return -1;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $stdin_data = delete $opts{stdin_data};
     my $timeout = delete $opts{timeout};
+    my $async = delete $opts{async};
     _croak_bad_options %opts;
 
     local $SIG{INT} = 'IGNORE';
@@ -982,10 +1048,12 @@ sub system {
     my ($in, undef, undef, $pid) = $self->open_ex(\%opts, @_) or return undef;
 
     $self->_io3(undef, undef, $in, $stdin_data, $timeout) if defined $stdin_data;
+    return $pid if $async;
     $self->_waitpid($pid);
 }
 
-_sub_options capture => qw(stderr_to_stdout stderr_fh stdin_fh quote_args tty ssh_opts);
+_sub_options capture => qw(stderr_to_stdout stderr_discard stderr_fh stdin_discard stdin_fh
+                           quote_args tty ssh_opts);
 sub capture {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -1008,7 +1076,7 @@ sub capture {
     $output
 }
 
-_sub_options capture2 => qw(stdin_fh quote_args tty ssh_opts);
+_sub_options capture2 => qw(stdin_discard stdin_fh quote_args tty ssh_opts);
 sub capture2 {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -1101,7 +1169,7 @@ sub rsync_put {
     $self->_rsync($opts, @src, $target);
 }
 
-_sub_options _scp => qw(stderr_to_stdout stderr_fh stdout_fh);
+_sub_options _scp => qw(stderr_to_stdout stderr_discard stderr_fh stdout_discard stdout_fh);
 sub _scp {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -1165,7 +1233,7 @@ my %rsync_error = (1, 'syntax or usage error',
 		   30, 'timeout in data send/receive',
 		   35, 'timeout waiting for daemon connection');
 
-my %rsync_opt_open_ex = map { $_ => 1 } qw(stderr_to_stdout stderr_fh stdout_fh);
+my %rsync_opt_open_ex = map { $_ => 1 } qw(stderr_to_stdout stderr_discard stderr_fh stdout_discard stdout_fh);
 
 sub _rsync {
     my $self = shift;
@@ -1498,13 +1566,11 @@ For instance, the following code connects to several remote machines
 in parallel:
 
   my (%ssh, %ls);
-  
   # multiple connections are stablished in parallel:
   for my $host (@hosts) {
       $ssh{$host} = Net::OpenSSH->new($host, async => 1);
   }
-  
-  # then to run some command in all the host (sequentially):
+  # then to run some command in all the hosts (sequentially):
   for my $host (@hosts) {
       $ssh{$host}->system('ls /');
   }
@@ -1538,6 +1604,18 @@ For instance:
 
   $ssh->scp_put("/foo/bar*", "/tmp")
     or die "scp failed: " . $ssh->error;
+
+=item master_stdout_fh => $fh
+
+=item master_stderr_fh => $fh
+
+Redirect corresponding stdio streams to given filehandles.
+
+=item master_stdout_discard => $bool
+
+=item master_stderr_discard => $bool
+
+Discard corresponding stdio streams.
 
 =back
 
@@ -1600,6 +1678,10 @@ written faster than it is read.
 
 Duplicates C<$fh> and uses it as the stdin stream of the remote process.
 
+=item stdin_discard => 1
+
+Uses /dev/null as the remote process stdin stream.
+
 =item stdout_pipe => 1
 
 Creates a new pipe and connects the writting side to the stdout stream
@@ -1614,6 +1696,10 @@ pseudo-pty. This option requires C<stdin_pty> to be also set.
 =item stdout_fh => $fh
 
 Duplicates C<$fh> and uses it as the stdout stream of the remote process.
+
+=item stdout_discard => 1
+
+Uses /dev/null as the remote process stdout stream.
 
 =item stderr_pipe => 1
 
@@ -1683,23 +1769,6 @@ Accepted options:
 
 =over 4
 
-=item stderr_to_stdout => $bool
-
-Redirects stderr to stdout. Both streams will be captured on the same
-scalar interleaved.
-
-=item stdout_fh => $fh
-
-Attaches the remote command stdout stream to the given file handle.
-
-=item stderr_fh => $fh
-
-Attaches the remote command stderr stream to the given file handle.
-
-=item stdin_fh => $fh
-
-Attaches the remote command stdin stream to the given file handle.
-
 =item stdin_data => $input
 
 =item stdin_data => \@input
@@ -1716,6 +1785,118 @@ As the Secure Shell protocol does not support signalling remote
 processes, in order to abort the remote process its input and output
 channels are closed. Unfortunately this aproach does not work in some
 cases.
+
+=item async => 1
+
+Does not wait for the child process to exit. The PID of the new
+process is returned.
+
+Note that when this option is combined with C<stdin_data>, the given
+data will be transferred to the remote side before returning control
+to the caller.
+
+See also the C<spawn> method documentation below.
+
+=item stdin_fh => $fh
+
+=item stdin_discard => $bool
+
+=item stdout_fh => $fh
+
+=item stdout_discard => $bool
+
+=item stderr_fh => $fh
+
+=item stderr_discard => $bool
+
+=item stderr_to_stdout => $bool
+
+=item tty => $bool
+
+See the C<open_ex> method documentation for an explanation of these
+options.
+
+=back
+
+=item $output = $ssh->capture(\%opts, @cmd);
+
+=item @output = $ssh->capture(\%opts, @cmd);
+
+This method is conceptually equivalent to the perl backquote operator
+(i.e. C<`ls`>): it runs the command on the remote machine and captures
+its output.
+
+In scalar context returns the output as a scalar. In list context
+returns the output broken into lines (it honors C<$/>, see
+L<perlvar/"$/">).
+
+When an error happens while capturing (for instance, the operation
+times out), the partial captured output will be returned. Error
+conditions have to be explicitly checked using the C<error>
+method. For instance:
+
+  my $output = $ssh->capture({ timeout => 10 },
+                             "echo hello; sleep 20; echo bye");
+  $ssh->error and
+      warn "operation didn't complete successfully: ". $ssh->error;
+  print $output;
+
+Accepted options:
+
+=over 4
+
+=item stdin_data => $input
+
+=item stdin_data => \@input
+
+=item timeout => $timeout
+
+See the C<system> method documentation for an explanation of these
+options.
+
+=item stdin_fh => $fh
+
+=item stdin_discard => $bool
+
+=item stderr_fh => $fh
+
+=item stderr_discard => $bool
+
+=item stderr_to_stdout => $bool
+
+=item tty => $bool
+
+See the C<open_ex> method documentation for an explanation of these
+options.
+
+=back
+
+=item ($output, $errput) = $ssh->capture2(\%opts, @cmd)
+
+captures the output sent to both stdout and stderr by C<@cmd> on the
+remote machine.
+
+The accepted options are:
+
+=over 4
+
+=item stdin_data => $input
+
+=item stdin_data => \@input
+
+=item timeout => $timeout
+
+See the C<system> method documentation for an explanation of these
+options.
+
+=item stdin_fh => $fh
+
+=item stdin_discard => $bool
+
+=item tty => $bool
+
+See the C<open_ex> method documentation for an explanation of these
+options.
 
 =back
 
@@ -1776,92 +1957,6 @@ with the following code:
   }
 
   waitpid($_, 0) for @pid;
-
-=item $output = $ssh->capture(\%opts, @cmd);
-
-=item @output = $ssh->capture(\%opts, @cmd);
-
-This method is conceptually equivalent to the perl backquote operator
-(i.e. C<`ls`>): it runs the command on the remote machine and captures
-its output.
-
-In scalar context returns the output as a scalar. In list context
-returns the output broken into lines (it honors C<$/>, see
-L<perlvar/"$/">).
-
-When an error happens while capturing (for instance, the operation
-times out), the partial captured output will be returned. Error
-conditions have to be explicitly checked using the C<error>
-method. For instance:
-
-  my $output = $ssh->capture({ timeout => 10 },
-                             "echo hello; sleep 20; echo bye");
-  $ssh->error and
-      warn "operation didn't complete successfully: ". $ssh->error;
-  print $output;
-
-Accepted options:
-
-=over 4
-
-=item stderr_to_stdout => $bool
-
-Redirects stderr to stdout. Both streams will be captured on the same
-scalar interleaved.
-
-=item stderr_fh => $fh
-
-Attaches the remote command stderr stream to the given file handle.
-
-=item stdin_data => $input
-
-=item stdin_data => \@input
-
-Sends the given data to the stdin stream while capturing the output on
-stdout.
-
-=item stdin_fh => $fh
-
-Attaches the remote command stdin stream to the given file handle.
-
-=item timeout => $timeout
-
-The operation is aborted after C<$timeout> seconds elapsed without
-network activity.
-
-As the Secure Shell protocol does not support signalling remote
-processes, in order to abort the remote process its input and output
-channels are closed. Unfortunately this aproach does not work in some
-cases.
-
-=back
-
-=item ($output, $errput) = $ssh->capture2(\%opts, @cmd)
-
-captures the output sent to both stdout and stderr by C<@cmd> on the
-remote machine.
-
-The accepted options are:
-
-=over 4
-
-=item stdin_data => $input
-
-=item stdin_data => \@input
-
-sends the given data to the stdin stream while simultaneously captures
-the output on stdout and stderr.
-
-=item stdin_fh => $fh
-
-attachs the remote command stdin stream to the given file handle.
-
-=item timeout => $timeout
-
-The operation is aborted after C<$timeout> seconds elapse without
-network activity.
-
-=back
 
 =item $ssh->scp_get(\%opts, $remote1, $remote2,..., $local_dir_or_file)
 
@@ -1924,17 +2019,14 @@ For instance, it is possible to transfer files to several hosts in
 parallel as follows:
 
   use Errno;
-
   my (%pid, %ssh);
   for my $host (@hosts) {
     $ssh{$host} = Net::OpenSSH->new($host, async => 1);
   }
-  
   for my $host (@hosts) {
     $pid{$host} = $ssh{$host}->scp_put({async => 1}, $local_fn, $remote_fn)
       or warn "scp_put to $host failed: " . $ssh{$host}->error . "\n";
   }
-  
   for my $host (@hosts) {
     if (my $pid = $pid{$host}) {
       if (waitpit($pid, 0) > 0) {
@@ -2026,6 +2118,8 @@ distinguish between those cases).
 Returns the list of arguments quoted so that they will be restored to
 their original form when parsed by the remote shell.
 
+In scalar context returns the list of arguments quoted and joined.
+
 Usually this task is done automatically by the module. See "Shell
 quoting" below.
 
@@ -2079,6 +2173,14 @@ For instance:
 
 will correctly handle the spaces in the program path.
 
+The shell quoting mechanism implements some extensions (for instance,
+performing redirections to /dev/null on the remote side) that can be
+dissabled with the option C<quote_args_extended>:
+
+  $ssh->system({ stderr_discard => 1,
+                 quote_args => 1, quote_args_extended => 0 },
+               @cmd);
+
 The option C<quote_args> can also be used to disable quoting when more
 than one argument is passed. For instance, to get some pattern
 expanded by the remote shell:
@@ -2120,7 +2222,7 @@ mini troubleshooting guide shows how to find it.
 
 =item 1 - check the error message
 
-Add in your script, after the Net::OpenSSH constructor call an error
+Add in your script, after the Net::OpenSSH constructor call, an error
 check:
 
   $ssh = Net::OpenSSH->new(...);
@@ -2179,7 +2281,7 @@ Net::OpenSSH performs some security checks on the directory where the
 multiplexing socket is going to be placed to ensure that it can not be
 accessed by other users.
 
-The default location for the multiplexing sockect is under
+The default location for the multiplexing socket is under
 C<~/.libnet-openssh-perl>. It can be changed using the C<ctl_dir> and
 C<ctl_path> constructor arguments.
 
@@ -2235,17 +2337,15 @@ on anything not resembling a modern Linux/Unix OS.
 Tested on Linux and NetBSD with OpenSSH 5.1p1
 
 To report bugs or give me some feedback, send an email to the address
-that appear below or use the L<CPAN bug tracking
-system|http://rt.cpan.org>.
+that appear below or use the CPAN bug tracking system at
+L<http://rt.cpan.org>.
 
-B<For questions related to module usage, post them in
-L<PerlMonks|http://perlmoks.org/>> (I read it frequently). This module
-is becoming increasingly popular and I am unable to cope with all the
-request for help I get by email.
+B<Post questions related to module usage in PerlMonks
+L<http://perlmoks.org/>> (that I read frequently). This module is
+becoming increasingly popular and I am unable to cope with all the
+request for help I get by email!
 
 =head1 TODO
-
-- add quoting support for other shells and OSs
 
 - add expect method
 
@@ -2253,13 +2353,15 @@ request for help I get by email.
 
 - integrate with IPC::PerlSSH
 
-- better timeout handling in capture methods
+- better timeout handling in system and capture methods
 
 - add support for more target OSs (quoting, OpenVMS, Windows & others)
 
 - add tests for scp and rsync methods
 
 - make C<pipe_in> and C<pipe_out> methods C<open_ex> based
+
+- add scp_cat and similar methods
 
 - write some kind of parallel queue manager module
 

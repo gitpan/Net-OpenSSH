@@ -1,5 +1,12 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.26  Feb 3, 2009
+        - docs reorganized and simplified
+        - new std(in|out|err)_discard options added
+  	- new master_std(out|err)_(fh|discard) options added (feature
+          request by Michael Courtney)
+        - async support in system
+
 0.25  Feb 2, 2009
         - remove obsolete FAQ
 
