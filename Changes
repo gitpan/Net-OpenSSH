@@ -1,13 +1,16 @@
 Revision history for Perl extension Net::OpenSSH.
 
-0.24
+0.25  Feb 2, 2009
+        - remove obsolete FAQ
+
+0.24  Feb 2, 2009
         WARNING!!! backward incompatible changes in this release:
-        =========================================================
-	- system method return value changed
+        ===============================================================
+	- system method now returns true on success and undef otherwise
 	- errors OSSH_SLAVE_SCP_FAILED and OSSH_SLAVE_RSYNC_FAILED
           replaced by generic OSSH_SLAVE_CMD_FAILED
 	- multiplexing_socket_path method renamed to get_ctl_path
-        =========================================================
+        ===============================================================
 	- new make_remote_command method
 	- troubleshooting guide added
 	- ask for help in Perlmonks!

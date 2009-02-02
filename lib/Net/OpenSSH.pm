@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.24';
+our $VERSION = '0.25';
 
 use strict;
 use warnings;
@@ -2200,32 +2200,6 @@ else has permissions to perform write operations on them.
 
 The constructor option C<strict_mode> disables these security checks,
 but you should not use it unless you understand its implications.
-
-=back
-
-=head1 FAQ
-
-=over 4
-
-=item Remote command exit status
-
-B<Question>: I use C<$ssh-E<gt>spawn> to asyncronously run compile
-jobs on slave machines. The Net::OpenSSH objects where compilation
-failed does not show error with $ssh->error. Is $ssh->error supposed
-to work in this case?
-
-B<Answer>: C<$ssh-E<gt>error> is only about the SSH layer. Exit codes
-for the remote commands are available in C<$?> (see L<perlfunc/system>
-and L<perlipc>).
-
-For instance:
-
-  my $pid = $ssh->spawn('gcc test.c');
-  $ssh->error and die "unable to start compilation job: ". $ssh->error;
-  ...
-  waitpid($pid, 0);
-  my $exit = ($? >> 8);
-  $exit == 0 or die "compilation failed with code $exit"; 
 
 =back
 
