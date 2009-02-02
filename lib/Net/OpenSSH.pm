@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.23';
+our $VERSION = '0.24';
 
 use strict;
 use warnings;
@@ -70,6 +70,11 @@ sub _set_error {
     return $err
 }
 
+sub _or_set_error {
+    my $self = shift;
+    $self->{_error} or $self->_set_error(@_);
+}
+
 sub _check_master_and_clear_error {
     my $self = shift;
     $self->wait_for_master or return undef;
@@ -130,6 +135,7 @@ sub new {
     $user = delete $opts{user} unless defined $user;
     $port = delete $opts{port} unless defined $port;
     $passwd = delete $opts{passwd} unless defined $passwd;
+    $passwd = delete $opts{password} unless defined $passwd;
     my $ctl_path = delete $opts{ctl_path};
     my $ctl_dir = delete $opts{ctl_dir};
     my $ssh_cmd = delete $opts{ssh_cmd};
@@ -236,6 +242,9 @@ sub new {
 sub get_user { shift->{_user} }
 sub get_host { shift->{_host} }
 sub get_port { shift->{_port} }
+sub get_ctl_path { shift->{_ctl_path} }
+
+sub error { shift->{_error} }
 
 sub _is_secure_path {
     my ($self, $path) = @_;
@@ -316,11 +325,18 @@ sub _kill_master {
     my $self = shift;
     my $pid = delete $self->{_pid};
     if ($pid) {
-        for my $sig (1, 1, 1, 9, 9) {
-            kill $sig, $pid or return;
-            waitpid($pid, WNOHANG) == $pid and return;
-            select(undef, undef, undef, 1);
+        for my $sig (0, 0, 1, 1, 1, 9, 9) {
+            if ($sig) {
+		kill $sig, $pid
+		    or return;
+	    }
+	    for (1..10) {
+		my $r = waitpid($pid, WNOHANG);
+		return if ($r == $pid or $! == Errno::ECHILD);
+		select(undef, undef, undef, 0.2);
+	    }
         }
+	warn "unable to kill SSH master connection (pid: $pid)";
     }
 }
 
@@ -353,12 +369,60 @@ sub _connect {
     $self->_wait_for_master($async, 1);
 }
 
+sub _waitpid {
+    my $self = shift;
+    my $pid = shift;
+
+    $? = 0;
+    if ($pid) {
+	while (1) {
+	    my $r = waitpid($pid, 0);
+	    if ($r == $pid) {
+		if ($?) {
+		    my $signal = ($? & 255);
+		    my $errstr = "child exited with code " . ($? >> 8);
+		    $errstr .= ", signal $signal" if $signal;
+		    $self->_or_set_error(OSSH_SLAVE_CMD_FAILED, @_, $errstr);
+		    return undef;
+		}
+		return 1;
+	    }
+	    if ($r > 0) {
+		warn "internal error: spurious process $r exited";
+		next;
+	    }
+	    next if $! == Errno::EINTR();
+	    if ($! == Errno::ECHILD) {
+		$self->_or_set_error(OSSH_SLAVE_FAILED,
+				     @_, "child process $pid does not exists", $!);
+		return undef
+	    }
+	    warn "Internal error: unexpected error (".($!+0).": $!) from waitpid($pid) = $r. Report it, please!";
+	    
+	    # wait a bit before trying again
+	    select(undef, undef, undef, 0.1);
+	}
+    }
+    else {
+	$self->_or_set_error(OSSH_SLAVE_FAILED, @_,
+			     "spawning of new process failed");
+	return undef;
+    }
+}
+
 sub wait_for_master {
     my $self = shift;
-    @_ <= 2 or croak 'Usage: $ssh->wait_for_master([$async])';
-    $self->{_wfm_status}                  ? $self->_wait_for_master(@_) :
-    $self->{_error} == OSSH_MASTER_FAILED ? undef                       :
-                                            1;
+    @_ <= 1 or croak 'Usage: $ssh->wait_for_master([$async])';
+    $self->{_wfm_status} and
+	return $self->_wait_for_master(@_);
+    $self->{_error} == OSSH_MASTER_FAILED and
+	return undef;
+    
+    unless (-S $self->{_ctl_path}) {
+	$self->_set_error(OSSH_MASTER_FAILED, "master ssh connection broken");
+	return undef;
+    }
+    1;
 }
 
 my $wfm_error_prefix = "unable to establish master SSH connection";
@@ -409,8 +473,20 @@ sub _wait_for_master {
                 }
                 return 1;
             }
+	    elsif ($check =~ /illegal option/i) {
+		$self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix,
+				  "OpenSSH 4.1 or later required");
+		$self->_kill_master;
+		return undef;
+	    }
+	    else {
+		$self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix,
+				  "Unknown error");
+		$self->_kill_master;
+		return undef;
+	    }
         }
-        if (waitpid($pid, WNOHANG) == $pid) {
+        if (waitpid($pid, WNOHANG) == $pid or $! == Errno::ECHILD) {
             $self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix,
                               "ssh master exited unexpectely");
             $self->{_master_status} = 'failed';
@@ -433,7 +509,7 @@ sub _wait_for_master {
                     if ($$bout =~ s/^(.*:)//s) {
                         $debug and $debug & 4 and _debug "passwd requested ($1)";
                         print $mpty "$passwd\n";
-                        $self->{_wfm_state} = 'password_sent';
+                        $status = 'password_sent';
                     }
                 }
                 else { $$bout = '' }
@@ -451,37 +527,21 @@ sub _wait_for_master {
     undef
 }
 
-sub error { shift->{_error} }
-
 sub _master_ctl {
     my ($self, $cmd) = @_;
     $self->capture({stderr_to_stdout => 1, ssh_opts => [-O => $cmd]});
-}
-
-sub system {
-    my $self = shift;
-    $self->_check_master_and_clear_error or return -1;
-    my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
-    my $tty = delete $opts{tty};
-    my @args = $self->_quote_args(\%opts, @_);
-    _croak_bad_options %opts;
-    my @ssh_opts;
-    $tty and push @ssh_opts, '-qt';
-    my @call = $self->_make_call(\@ssh_opts, @args);
-    $debug and $debug & 16 and _debug_dump system => \@call;
-    CORE::system @call;
 }
 
 sub _make_pipe {
     my $self = shift;
     my ($r, $w);
     unless (pipe ($r, $w)) {
-        $self->_set_error(OSSH_PIPE_FAILED, "unable to create pipe: $!");
+        $self->_set_error(OSSH_SLAVE_PIPE_FAILED, @_, "unable to create pipe: $!");
         return ();
     }
     my $old = select;
-    select $r; $|=1;
-    select $w; $|=1;
+    select $r; $ |= 1;
+    select $w; $ |= 1;
     select $old;
     return ($r, $w);
 }
@@ -550,6 +610,29 @@ sub _check_is_system_fh {
     croak "child process $name is not a real system file handle";
 }
 
+sub _array_or_scalar { map { defined($_) ? (ref $_ eq 'ARRAY' ? @$_ : $_ ) : () } @_ }
+
+sub make_remote_command {
+    my $self = shift;
+    $self->_check_master_and_clear_error or return ();
+    my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
+    my $tty = delete $opts{tty};
+    my @args = $self->_quote_args(\%opts, @_);
+    _croak_bad_options %opts;
+    my @ssh_opts;
+    $tty and push @ssh_opts, '-qt';
+    my @call = $self->_make_call(\@ssh_opts, @args);
+    if (wantarray) {
+	$debug and $debug & 16 and _debug_dump make_remote_command => \@call;
+	return @call;
+    }
+    else {
+	my $call = join ' ', $self->shell_quote(@call);
+	$debug and $debug & 16 and _debug_dump 'make_remote_command (quoted)' => $call;
+	return $call
+    }
+}
+
 sub open_ex {
     my $self = shift;
     $self->_check_master_and_clear_error or return ();
@@ -580,13 +663,13 @@ sub open_ex {
         $close_slave_pty = delete $opts{close_slave_pty};
         $close_slave_pty = 1 unless defined $close_slave_pty;
     }
-    my @ssh_opts;
-    my $ssh_opts = delete $opts{ssh_opts};
-    if (defined $ssh_opts) {
-	@ssh_opts = (ref $ssh_opts eq 'ARRAY' ? @$ssh_opts : $ssh_opts);
-    }
+    my @ssh_opts = _array_or_scalar delete $opts{ssh_opts};
+
     my $cmd = delete $opts{_cmd};
     $cmd = 'ssh' unless defined $cmd;
+
+    my @error_prefix = delete $opts{_error_prefix};
+
 
     my @args = $self->_quote_args(\%opts, @_);
     _croak_bad_options %opts;
@@ -596,7 +679,7 @@ sub open_ex {
     push @ssh_opts, '-qt' if ($tty or $stdin_pty);
 
     if ($stdin_pipe) {
-        ($rin, $win) = $self->_make_pipe or return;
+        ($rin, $win) = $self->_make_pipe(@error_prefix) or return;
     }
     elsif ($stdin_pty) {
         _load_module('IO::Pty');
@@ -612,7 +695,7 @@ sub open_ex {
     _check_is_system_fh STDIN => $rin;
 
     if ($stdout_pipe) {
-        ($rout, $wout) = $self->_make_pipe or return;
+        ($rout, $wout) = $self->_make_pipe(@error_prefix) or return;
     }
     elsif ($stdout_pty) {
         $wout = $rin;
@@ -627,7 +710,7 @@ sub open_ex {
 
     unless ($stderr_to_stdout) {
 	if ($stderr_pipe) {
-	    ($rerr, $werr) = $self->_make_pipe or return ();
+	    ($rerr, $werr) = $self->_make_pipe(@error_prefix) or return ();
 	}
 	elsif (defined $stderr_fh) {
 	    $werr = $stderr_fh;
@@ -641,7 +724,7 @@ sub open_ex {
     if (defined $wout and fileno $wout < 1) {
 	my $wout_dup;
 	unless (open $wout_dup, '>>&', $wout) {
-	    $self->_set_error(OSSH_SLAVE_FAILED,
+	    $self->_set_error(OSSH_SLAVE_FAILED, @error_prefix,
 			      "unable to dup child STDOUT: $!");
 	    return ()
 	}
@@ -651,7 +734,7 @@ sub open_ex {
     if (defined $werr and fileno $werr < 2) {
 	my $werr_dup;
 	unless (open $werr_dup, '>>&', $werr) {
-	    $self->_set_error(OSSH_SLAVE_FAILED,
+	    $self->_set_error(OSSH_SLAVE_FAILED, @error_prefix,
 			      "unable to dup child STDERR: $!");
 	    return ()
 	}
@@ -660,7 +743,8 @@ sub open_ex {
 
     my $pid = fork;
     unless (defined $pid) {
-        $self->_set_error(OSSH_SLAVE_FAILED, "unable to fork new ssh slave: $!");
+        $self->_set_error(OSSH_SLAVE_FAILED,  @error_prefix,
+			  "unable to fork new ssh slave: $!");
         return ();
     }
     unless ($pid) {
@@ -728,9 +812,9 @@ sub pipe_out {
 }
 
 sub _io3 {
-    my ($self, $pid, $out, $err, $in, $stdin_data, $timeout) = @_;
+    my ($self, $out, $err, $in, $stdin_data, $timeout) = @_;
     $self->_check_master_and_clear_error or return ();
-    my @data = (ref $stdin_data eq 'ARRAY' ? @$stdin_data : $stdin_data);
+    my @data = _array_or_scalar $stdin_data;
     my ($cout, $cerr, $cin) = (defined($out), defined($err), defined($in));
     $timeout = $self->{_timeout} unless defined $timeout;
 
@@ -804,7 +888,7 @@ sub _io3 {
             }
             else {
                 next if ($n < 0 and $! == Errno::EINTR());
-                $self->_set_error(OSSH_SLAVE_FAILED, "ssh slave failed", "timed out");
+                $self->_set_error(OSSH_SLAVE_TIMEOUT, "ssh slave failed", "timed out");
                 last MLOOP;
             }
         }
@@ -813,7 +897,6 @@ sub _io3 {
     close $err if $cerr;
     close $in if $cin;
 
-    waitpid($pid, 0);
     return ($bout, $berr);
 }
 
@@ -883,20 +966,41 @@ sub open3pty {
     return ($pty, $err, $pid);
 }
 
-_sub_options capture => qw(stderr_to_stdout stderr_fh stdin_fh quote_args tty ssh_opts);
-sub capture {
+_sub_options system => qw(stderr_to_stdout stdout_fh stdin_fh stderr_fh quote_args tty ssh_opts);
+sub system {
     my $self = shift;
-
+    $self->_check_master_and_clear_error or return -1;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $stdin_data = delete $opts{stdin_data};
     my $timeout = delete $opts{timeout};
     _croak_bad_options %opts;
 
-    my ($in, $out, undef, $pid) =
-        $self->open_ex({ stdout_pipe => 1,
-                         stdin_pipe => (defined $stdin_data ? 1 : undef),
-                         %opts }, @_) or return ();
-    my ($output) = $self->_io3($pid, $out, undef, $in, $stdin_data, $timeout);
+    local $SIG{INT} = 'IGNORE';
+    local $SIG{QUIT} = 'IGNORE';
+
+    $opts{stdin_pipe} = 1 if defined $stdin_data;
+    my ($in, undef, undef, $pid) = $self->open_ex(\%opts, @_) or return undef;
+
+    $self->_io3(undef, undef, $in, $stdin_data, $timeout) if defined $stdin_data;
+    $self->_waitpid($pid);
+}
+
+_sub_options capture => qw(stderr_to_stdout stderr_fh stdin_fh quote_args tty ssh_opts);
+sub capture {
+    my $self = shift;
+    my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
+    my $stdin_data = delete $opts{stdin_data};
+    my $timeout = delete $opts{timeout};
+    _croak_bad_options %opts;
+
+    local $SIG{INT} = 'IGNORE';
+    local $SIG{QUIT} = 'IGNORE';
+
+    $opts{stdout_pipe} = 1;
+    $opts{stdin_pipe} = 1 if defined $stdin_data;
+    my ($in, $out, undef, $pid) = $self->open_ex(\%opts, @_) or return ();
+    my ($output) = $self->_io3($out, undef, $in, $stdin_data, $timeout);
+    $self->_waitpid($pid);
     if (wantarray) {
         my $pattern = quotemeta $/;
         return split /(?<=$pattern)/, $output;
@@ -912,14 +1016,16 @@ sub capture2 {
     my $timeout = delete $opts{timeout};
     _croak_bad_options %opts;
 
-    my ($in, $out, $err, $pid) =
-        $self->open_ex( { stdin_pipe => (defined $stdin_data ? 1 : undef),
-                          stdout_pipe => 1,
-                          stderr_pipe => 1,
-                          %opts }, @_)
-            or return ();
+    local $SIG{INT} = 'IGNORE';
+    local $SIG{QUIT} = 'IGNORE';
 
-    $self->_io3($pid, $out, $err, $in, $stdin_data, $timeout);
+    $opts{stdout_pipe} = 1;
+    $opts{stderr_pipe} = 1;
+    $opts{stdin_pipe} = 1 if defined $stdin_data;
+    my ($in, $out, $err, $pid) = $self->open_ex( \%opts, @_) or return ();
+    my @capture = $self->_io3($out, $err, $in, $stdin_data, $timeout);
+    $self->_waitpid($pid);
+    wantarray ? @capture : $capture[0];
 }
 
 sub _calling_method {
@@ -975,7 +1081,7 @@ sub _scp_put_args {
 	require File::Glob;
 	@src = map File::Glob::bsd_glob($_, $glob_flags), @src;
 	unless (@src) {
-	    $self->_set_error(OSSH_SLAVE_SCP_FAILED,
+	    $self->_set_error(OSSH_SLAVE_FAILED,
 			      "given file name patterns did not match any file");
 	    return undef;
 	}
@@ -1017,34 +1123,13 @@ sub _scp {
 
     my $pid = $self->open_ex({ %opts,
                                _cmd => 'scp',
+			       _error_prefix => 'unable to spawn scp process',
 			       ssh_opts => \@opts,
 			       quote_args => 0 },
 			     @_);
 
-    unless (defined $pid) {
-	$self->_set_error(OSSH_SLAVE_SCP_FAILED,
-			  "unable to spawn scp process: " . $self->error);
-	return undef
-    }
-
     return $pid if $async;
-
-    while (1) {
-	if (waitpid($pid, 0) == $pid) {
-	    if ($?) {
-		$self->_set_error(OSSH_SLAVE_SCP_FAILED, "scp exited with error code " . ($?>>8));
-		return undef;
-	    }
-	    return 1;
-	}
-	if ($! == Errno::ECHILD) {
-	    $self->_set_error(OSSH_SLAVE_SCP_FAILED, "scp operation failed: $!");
-	    return undef
-	}
-	
-	# wait a bit before trying again
-	select(undef, undef, undef, 0.1);
-    }
+    $self->_waitpid("scp operation failed");
 }
 
 my %rsync_opt_with_arg = map { $_ => 1 } qw(chmod suffix backup-dir rsync-path max-delete max-size min-size partial-dir
@@ -1097,6 +1182,7 @@ sub _rsync {
     push @opts, '-p' if $copy_attrs;
 
     my %opts_open_ex = ( _cmd => 'rsync',
+			 _error_prefix => 'rsync command failed',
 			 quote_args => 0 );
 
     for my $opt (keys %opts) {
@@ -1110,8 +1196,7 @@ sub _rsync {
 		$opt1 =~ tr/_/-/;
 		$rsync_opt_forbiden{$opt1} and croak "forbiden rsync option '$opt' used";
 		if ($rsync_opt_with_arg{$opt}) {
-		    push @opts, "--$opt1=$_"
-			for (ref($value) eq 'ARRAY' ? @$value : $value);
+		    push @opts, "--$opt1=$_" for _array_or_scalar($value)
 		}
 		else {
 		    $value = !$value if $opt1 =~ s/^no-//;
@@ -1122,44 +1207,38 @@ sub _rsync {
     }
 
     my $pid = $self->open_ex(\%opts_open_ex, @opts, '--', @_);
-    unless (defined $pid) {
-	$self->_set_error(OSSH_SLAVE_RSYNC_FAILED,
-			  "unable to spawn rsync process: " . $self->error);
-	return undef;
-    }
-
     return $pid if $async;
 
-    while(1) {
-	if (waitpid($pid, 0) == $pid) {
-	    if ($?) {
-		my $err = ($? >> 8);
-		my $errstr = $rsync_error{$err};
-		$errstr = 'Unknown rsync error' unless defined $errstr;
-		my $signal = $? & 255;
-		my $signalstr = ($signal ? " (signal $signal)" : '');
-		$self->_set_error(OSSH_SLAVE_RSYNC_FAILED, "rsync exited with error code $err$signalstr: $errstr");
-		return undef;
-	    }
-	    return 1;
-	}
-	if ($! == Errno::ECHILD) {
-	    $self->_set_error(OSSH_SLAVE_RSYNC_FAILED, "rsync operation failed: $!");
-	    return undef
-	}
-	select(undef, undef, undef, 0.1);
-    }
+    $self->_waitpid($pid) and return 1;
 
+    if ($self->error == OSSH_SLAVE_CMD_FAILED and $?) {
+	my $err = ($? >> 8);
+	my $errstr = $rsync_error{$err};
+	$errstr = 'Unknown rsync error' unless defined $errstr;
+	my $signal = $? & 255;
+	my $signalstr = ($signal ? " (signal $signal)" : '');
+	$self->_set_error(OSSH_SLAVE_CMD_FAILED, "rsync exited with error code $err$signalstr: $errstr");
+    }
+    return undef
 }
 
 sub sftp {
     my $self = shift;
-    _load_module('Net::SFTP::Foreign');
-    my @call = $self->_make_call([-s => 'sftp']);
-    Net::SFTP::Foreign->new(open2_cmd => \@call);
-}
 
-sub mux_socket_path { shift->{_ctl_path} }
+    @_ & 1 and croak 'Usage: $ssh->sftp(%sftp_opts)';
+
+    $self->_check_master_and_clear_error or return undef;
+    my @call = $self->_make_call([-s => 'sftp']);
+    _load_module('Net::SFTP::Foreign');
+    my $sftp = Net::SFTP::Foreign->new(open2_cmd => \@call,
+				       timeout => $self->{_timeout},
+				       @_);
+    if ($sftp->error) {
+	$self->_or_set_error(OSSH_SLAVE_SFTP_FAILED, "unable to create SFTP client", $sftp->error);
+	return undef;
+    }
+    $sftp
+}
 
 sub DESTROY {
     my $self = shift;
@@ -1167,8 +1246,9 @@ sub DESTROY {
     $debug and $debug & 2 and _debug("DESTROY($self, pid => ".(defined $pid ? $pid : undef).")");
     if ($pid) {
         local $?;
-        $self->_master_ctl('exit') if defined $pid;
-        waitpid($pid, 0);
+	local $!;
+        $self->_master_ctl('exit');
+	$self->_kill_master;
     }
 }
 
@@ -1187,23 +1267,25 @@ Net::OpenSSH - Perl SSH client package implemented on top of OpenSSH
   $ssh->error and
     die "Couldn't establish SSH connection: ". $ssh->error;
 
-  $ssh->system("ls /tmp") == 0 or
-    die "remote system command failed with code: " . ($? >> 8);
+  $ssh->system("ls /tmp") or
+    die "remote command failed: " . $ssh->error;
 
   my @ls = $ssh->capture("ls");
   $ssh->error and
     die "remote ls command failed: " . $ssh->error;
 
   my ($out, $err) = $ssh->capture2("find /root");
+  $ssh->error and
+    die "remote find command failed: " . $ssh->error;
 
-  my ($rin, $pid) = $ssh->pipe_in("cat >/tmp/foo")
-    or die "pipe_in method failed: " . $ssh->error;
+  my ($rin, $pid) = $ssh->pipe_in("cat >/tmp/foo") or
+    die "pipe_in method failed: " . $ssh->error;
 
   print $rin, "hello\n";
   close $rin;
 
-  my ($rout, $pid) = $ssh->pipe_out("cat /tmp/foo")
-    or die "pipe_out method failed: " . $ssh->error;
+  my ($rout, $pid) = $ssh->pipe_out("cat /tmp/foo") or
+    die "pipe_out method failed: " . $ssh->error;
 
   while (<$rout>) { print }
   close $rout;
@@ -1340,6 +1422,9 @@ has to be performed explicitly afterwards:
   my $ssh = Net::OpenSSH->new($host, %opts);
   $ssh->error and die "Can't ssh to $host: " . $ssh->error;
 
+If you have problems getting Net::OpenSSH to connect to the remote
+host read the troubleshotting chapter near the end of this document.
+
 Accepted options:
 
 =over 4
@@ -1353,6 +1438,8 @@ Login name
 TCP port number where the server is running
 
 =item passwd => $passwd
+
+=item password => $passwd
 
 User password for logins on the remote side
 
@@ -1388,7 +1475,7 @@ Name or full path to C<rsync> binary. Defaults to C<rsync>.
 
 =item timeout => $timeout
 
-<aximum acceptable time that can elapse without network traffic or any
+Maximum acceptable time that can elapse without network traffic or any
 other event happening on methods that are not immediate (for instance,
 when establishing the master SSH connection or inside C<capture>
 method).
@@ -1437,8 +1524,8 @@ master connection. For instance:
 =item default_stderr_fh => $fh
 
 Default I/O streams for open_ex and derived methods (currently, that
-means any method but C<system>, C<pipe_in> and C<pipe_out> and I plan
-to remove those exceptions soon!).
+means any method but C<pipe_in> and C<pipe_out> and I plan to remove
+those exceptions soon!).
 
 For instance:
 
@@ -1471,20 +1558,14 @@ L<Net::OpenSSH::Constants>).
 
 Return the corresponding SSH login parameters.
 
-=item $ssh->system(@cmd)
+=item $ssh->get_ctl_path
 
-Similar to the C<system> builtin, runs the command C<@cmd> on the
-remote machine using the current stdin, stdout and stderr streams for
-IO.
-
-Example:
-
-   $ssh->system('ls -R /');
-
-The value returned also follows the C<system> builtin convention (see
-L<perlvar/"$?">).
+Returns the path to the socket where OpenSSH listens for new
+multiplexed connections.
 
 =item ($in, $out, $err, $pid) = $ssh->open_ex(\%opts, @cmd)
+
+I<Note: this is a low level method that, probably, you don't need to use!>
 
 That method starts the command C<@cmd> on the remote machine creating
 new pipes for the IO channels as specified on the C<%opts> hash.
@@ -1559,7 +1640,7 @@ automatically closed on the parent process after forking the ssh
 command.
 
 This option dissables that feature, so that the slave pty can be
-accessed on the parent process as C<<$pty->slave>>. It will have to be
+accessed on the parent process as C<$pty-E<gt>slave>. It will have to be
 explicitly closed (see L<IO::Pty>)
 
 =item quote_args => $bool
@@ -1579,6 +1660,64 @@ Usage example:
   # do some IO through $in/$out
   # ...
   waitpid($pid);
+
+=item $ssh->system(\%opts, @cmd)
+
+Runs the command C<@cmd> on the remote machine.
+
+Returns true on sucess, undef otherwise.
+
+The error status is set to C<OSSH_SLAVE_CMD_FAILED> when the remote
+command exits with a non zero code (the code is available from C<$?>,
+see L<perlvar/"$?">).
+
+Example:
+
+  $ssh->system('ls -R /')
+    or die "ls failed: " . $ssh->error";
+
+As for C<system> builtin, C<SIGINT> and C<SIGQUIT> signals are blocked
+(see L<perlfunc/system>).
+
+Accepted options:
+
+=over 4
+
+=item stderr_to_stdout => $bool
+
+Redirects stderr to stdout. Both streams will be captured on the same
+scalar interleaved.
+
+=item stdout_fh => $fh
+
+Attaches the remote command stdout stream to the given file handle.
+
+=item stderr_fh => $fh
+
+Attaches the remote command stderr stream to the given file handle.
+
+=item stdin_fh => $fh
+
+Attaches the remote command stdin stream to the given file handle.
+
+=item stdin_data => $input
+
+=item stdin_data => \@input
+
+Sends the given data to the stdin stream while capturing the output on
+stdout.
+
+=item timeout => $timeout
+
+The operation is aborted after C<$timeout> seconds elapsed without
+network activity.
+
+As the Secure Shell protocol does not support signalling remote
+processes, in order to abort the remote process its input and output
+channels are closed. Unfortunately this aproach does not work in some
+cases.
+
+=back
 
 =item ($in, $pid) = $ssh->pipe_in(\%opts, @cmd)
 
@@ -1667,7 +1806,7 @@ Accepted options:
 
 =item stderr_to_stdout => $bool
 
-Redirect stderr to stdout. Both streams will be captured on the same
+Redirects stderr to stdout. Both streams will be captured on the same
 scalar interleaved.
 
 =item stderr_fh => $fh
@@ -1845,10 +1984,26 @@ For instance:
                   '/remote/dir', '/local/dir');
 
 
-=item $sftp = $ssh->sftp
+=item $sftp = $ssh->sftp(%sftp_opts)
 
 Creates a new L<Net::SFTP::Foreign> object for SFTP interaction that
 runs through the ssh master connection.
+
+=item @call = $ssh->make_remote_command(%opts, @cmd)
+
+=item $call = $ssh->make_remote_command(\%opts, @cmd)
+
+This method returns the arguments required to execute a command on the
+remote machine via SSH. For instance:
+
+  my @call = $ssh->make_remote_command(ls => "/var/log");
+  system @call;
+
+In scalar context, returns the arguments quoted and joined into one
+string:
+
+  my $remote = $ssh->make_remote_comand("cd /tmp/ && tar xf -");
+  system "tar cf - . | $remote";
 
 =item $ssh->wait_for_master($async)
 
@@ -1878,11 +2033,6 @@ quoting" below.
 
 This method is like the previous C<shell_quote> but leaves wildcard
 characters unquoted.
-
-=item $ssh->mux_socket_path
-
-Returns the path to the socket where OpenSSH listens for new
-multiplexed connections.
 
 =back
 
@@ -1953,6 +2103,106 @@ the corresponding debug flag:
 
   $Net::OpenSSH::debug |= 16;
 
+Also, the current implementation expects a shell compatible with Unix
+C<sh> in the remote side. It will not work if for instance, the remote
+machine runs Windows, VMS or it is a router.
+
+I plan to add support for different quoting mechanisms in the
+future... if you need it now, just ask for it!!!
+
+=head1 Troubleshooting
+
+Usually, Net::OpenSSH works out of the box, but when it fails, some
+users have a hard time finding the root of the problem. This
+mini troubleshooting guide shows how to find it.
+
+=over 4
+
+=item 1 - check the error message
+
+Add in your script, after the Net::OpenSSH constructor call an error
+check:
+
+  $ssh = Net::OpenSSH->new(...);
+  $ssh->error and die "SSH connection failed: " . $ssh->error;
+
+The error message will tell what has gone wrong.
+
+=item 2 - OpenSSH version
+
+Ensure that you have a version of C<ssh> recent enough:
+
+  $ ssh -V
+  OpenSSH_5.1p1 Debian-5, OpenSSL 0.9.8g 19 Oct 2007
+
+OpenSSH version 4.1 was the first to support the multiplexing feature
+and is the minimal required by the module to work. I advise you to use
+the latest OpenSSH (currently 5.1) or at least a more recent
+version.
+
+The C<ssh_cmd> constructor option lets you select the C<ssh> binary to
+use. For instance:
+
+  $ssh = Net::OpenSSH->new($host,
+                           ssh_cmd => "/opt/OpenSSH/5.1/bin/ssh")
+
+=item 3 - run ssh from the command line
+
+Check you can connect to the remote host using the same parameters you
+are passing to Net::OpenSSH. In particular, ensure that you are
+running C<ssh> as the same local user.
+
+If you are running your script from a webserver, the user
+would probably be C<www>, C<apache> or something alike.
+
+Common problems are:
+
+=over 4
+
+=item *
+
+Not having the remote host public key in the known_hosts file.
+
+=item *
+
+Wrong permissions for the C<~/.ssh> directory or its contents.
+
+=item *
+
+Incorrect settings for public key authentication.
+
+=back
+
+=item 4 - security checks on the multiplexing socket
+
+Net::OpenSSH performs some security checks on the directory where the
+multiplexing socket is going to be placed to ensure that it can not be
+accessed by other users.
+
+The default location for the multiplexing sockect is under
+C<~/.libnet-openssh-perl>. It can be changed using the C<ctl_dir> and
+C<ctl_path> constructor arguments.
+
+The requirements for that directory and all its parents are:
+
+=over 4
+
+=item * 
+
+They have to be owned by the user executing the script or by root
+
+=item *
+
+Their permission masks have to be 0755 or more restrictive, so nobody
+else has permissions to perform write operations on them.
+
+=back
+
+The constructor option C<strict_mode> disables these security checks,
+but you should not use it unless you understand its implications.
+
+=back
+
 =head1 FAQ
 
 =over 4
@@ -1995,7 +2245,7 @@ L<Expect> can be used to interact with commands run through this module
 on the remote machine.
 
 Other Perl SSH clients: L<Net::SSH::Perl>, L<Net::SSH2>, L<Net::SSH>,
-L<Net::SSH::Perl>.
+L<Net::SSH::Expect>, L<Net::SCP>.
 
 =head1 BUGS AND SUPPORT
 
@@ -2010,15 +2260,18 @@ on anything not resembling a modern Linux/Unix OS.
 
 Tested on Linux and NetBSD with OpenSSH 5.1p1
 
-To report bugs send my an email to the address that appear below or
-use the L<CPAN bug tracking system|http://rt.cpan.org>.
+To report bugs or give me some feedback, send an email to the address
+that appear below or use the L<CPAN bug tracking
+system|http://rt.cpan.org>.
 
-For questions related to module usage, you can also contact my by
-email but I would prefer if you post them in
-L<PerlMonks|http://perlmoks.org/> (that I read frequently), so other
-people can also find them.
+B<For questions related to module usage, post them in
+L<PerlMonks|http://perlmoks.org/>> (I read it frequently). This module
+is becoming increasingly popular and I am unable to cope with all the
+request for help I get by email.
 
 =head1 TODO
+
+- add quoting support for other shells and OSs
 
 - add expect method
 
@@ -2032,7 +2285,7 @@ people can also find them.
 
 - add tests for scp and rsync methods
 
-- make C<pipe_in>, C<pipe_out> and C<system> methods C<open_ex> based
+- make C<pipe_in> and C<pipe_out> methods C<open_ex> based
 
 - write some kind of parallel queue manager module
 

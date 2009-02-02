@@ -12,9 +12,10 @@ our %EXPORT_TAGS = (error => []);
 
 my %error = ( OSSH_MASTER_FAILED => 1,
               OSSH_SLAVE_FAILED => 2,
-              OSSH_PIPE_FAILED => 3,
-	      OSSH_SLAVE_SCP_FAILED => 4,
-	      OSSH_SLAVE_RSYNC_FAILED => 5,
+              OSSH_SLAVE_PIPE_FAILED => 3,
+	      OSSH_SLAVE_TIMEOUT => 4,
+	      OSSH_SLAVE_CMD_FAILED => 5,
+	      OSSH_SLAVE_SFTP_FAILED => 6
             );
 
 for my $key (keys %error) {
@@ -40,10 +41,20 @@ Net::OpenSSH::Constants - Constant definitions for Net::OpenSSH
 
 =head1 DESCRIPTION
 
-This module exports the following constants to be used with
-L<Net::OpenSSH>: C<OSSH_MASTER_FAILED>, C<OSSH_SLAVE_FAILED>,
-C<OSSH_PIPE_FAILED>, C<OSSH_SLAVE_SCP_FAILED>,
-C<OSSH_SLAVE_RSYNC_FAILED>.
+This module exports the following constants:
+
+=over 4
+
+=item :error
+
+  OSSH_MASTER_FAILED - some error related to the master SSH connection happened
+  OSSH_SLAVE_FAILED - some error related to a slave SSH connection happened
+  OSSH_SLAVE_PIPE_FAILED - unable to create pipe to communicate with slave process
+  OSSH_SLAVE_TIMEOUT - slave process timeout
+  OSSH_SLAVE_CMD_FAILED - child process exited with a non zero status
+  OSSH_SLAVE_SFTP_FAILED - creation of SFTP client failed
+
+=back
 
 =head1 COPYRIGHT AND LICENSE
 

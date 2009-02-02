@@ -1,5 +1,21 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.24
+        WARNING!!! backward incompatible changes in this release:
+        =========================================================
+	- system method return value changed
+	- errors OSSH_SLAVE_SCP_FAILED and OSSH_SLAVE_RSYNC_FAILED
+          replaced by generic OSSH_SLAVE_CMD_FAILED
+	- multiplexing_socket_path method renamed to get_ctl_path
+        =========================================================
+	- new make_remote_command method
+	- troubleshooting guide added
+	- ask for help in Perlmonks!
+	- check multiplexing socket before any command
+	- more robust waitpid used
+	- detect old OpenSSH versions of ssh (bug report and patch by
+          David Markham)
+
 0.23  Jan 25, 2009
         - don't quote ~ when globing (bug report by Niels Larsen)
         - IPv6 addresses are not required inside brackets (feature

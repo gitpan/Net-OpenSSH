@@ -70,7 +70,7 @@ sub shell_quote {
     $txt
 }
 
-my $muxs = $ssh->mux_socket_path;
+my $muxs = $ssh->get_ctl_path;
 ok(-S $muxs, "mux socket exists");
 is((stat $muxs)[2] & 0777, 0600, "mux socket permissions");
 
