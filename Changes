@@ -1,5 +1,12 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.27  Feb 5, 2009
+	- better tty feature handling in open_ex, now it defaults to
+          ssh default behaviour
+	- support for \ and \\ quoting escapes added
+	- minor doc corrections
+	- document ssh_opts (bug report by Graham Knop)
+
 0.26  Feb 3, 2009
         - docs reorganized and simplified
         - new std(in|out|err)_discard options added

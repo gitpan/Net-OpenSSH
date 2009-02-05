@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.26';
+our $VERSION = '0.27';
 
 use strict;
 use warnings;
@@ -630,10 +630,32 @@ sub _quote_args {
     $quote = (@_ > 1) unless defined $quote;
     
     if ($quote) {
+	my $quoter_glob = $self->_arg_quoter_glob;
 	my $quoter = ($glob_quoting
-		      ? $self->_arg_quoter_glob
+		      ? $quoter_glob
 		      : $self->_arg_quoter);
-	my @quoted = map $quoter->($_), @_;
+
+	# foo   => $quoter
+	# \foo  => $quoter_glob
+	# \\foo => no quoting at all and disable extended quoting as it is not safe
+	my @quoted;
+	for (@_) {
+	    if (ref $_) {
+		if (ref $_ eq 'SCALAR') {
+		    push @quoted, $quoter_glob->($$_);
+		}
+		if (ref $_ eq 'REF' and ref $$_ eq 'SCALAR') {
+		    push @quoted, $$$_;
+		    undef $quote_extended;
+		}
+		else {
+		    croak "invalid reference in remote command argument list"
+		}
+	    }
+	    else {
+		push @quoted, $quoter->($_);
+	    }
+	}
 
 	if ($quote_extended) {
 	    push @quoted, '</dev/null' if $opts->{stdin_discard};
@@ -648,6 +670,9 @@ sub _quote_args {
 	wantarray ? @quoted : join(" ", @quoted);
     }
     else {
+	croak "reference found in argument list when argument quoting is disabled"
+	    if (grep ref, @_);
+
 	wantarray ? @_ : join(" ", @_);
     }
 }
@@ -670,7 +695,7 @@ sub make_remote_command {
     my @args = $self->_quote_args(\%opts, @_);
     _croak_bad_options %opts;
     my @ssh_opts;
-    $tty and push @ssh_opts, '-qt';
+    push @ssh_opts, ($tty ? '-qt' : '-T') if defined $tty;
     my @call = $self->_make_call(\@ssh_opts, @args);
     if (wantarray) {
 	$debug and $debug & 16 and _debug_dump make_remote_command => \@call;
@@ -712,7 +737,7 @@ sub open_ex {
     my $tty = delete $opts{tty};
     my $close_slave_pty;
     if ($stdin_pty) {
-        $tty = 1 unless defined $tty;
+        # $tty = 1 unless defined $tty;
         $close_slave_pty = delete $opts{close_slave_pty};
         $close_slave_pty = 1 unless defined $close_slave_pty;
     }
@@ -723,14 +748,16 @@ sub open_ex {
 
     my @error_prefix = delete $opts{_error_prefix};
 
-    $opts{quote_args_extended} = 1 if (!defined $opts{quote_args_extended} and $cmd eq 'ssh');
+    $opts{quote_args_extended} = 1
+	if (!defined $opts{quote_args_extended} and $cmd eq 'ssh');
+
     my @args = $self->_quote_args(\%opts, @_);
 
     _croak_bad_options %opts;
 
     my ($rin, $win, $rout, $wout, $rerr, $werr);
 
-    push @ssh_opts, '-qt' if ($tty or $stdin_pty);
+    push @ssh_opts, ($tty ? '-qt' : '-T') if defined $tty;
 
     if ($stdin_pipe) {
         ($rin, $win) = $self->_make_pipe(@error_prefix) or return;
@@ -738,6 +765,10 @@ sub open_ex {
     elsif ($stdin_pty) {
         _load_module('IO::Pty');
         $win = IO::Pty->new;
+	unless ($win) {
+	    $self->_set_error(OSSH_SLAVE_PIPE_FAILED, @error_prefix, "unable to allocate pseudo-tty: $!");
+	    return ();
+	}
         $rin = $win->slave;
     }
     elsif (defined $stdin_fh) {
@@ -843,7 +874,7 @@ sub open_ex {
         do { exec @call };
         POSIX::_exit(255);
     }
-    $win->close_slave() if ($tty and defined $win and $close_slave_pty);
+    $win->close_slave() if $close_slave_pty;
     wantarray ? ($win, $rout, $rerr, $pid) : $pid;
 }
 
@@ -1394,9 +1425,10 @@ clients available?
 
 Well, this is my (biased) opinion:
 
-L<Net::SSH::Perl> is not well maintained nowadays, requires a bunch of
-modules (some of them very difficult to install) to be acceptably
-efficient and has an API that is limited in some ways.
+L<Net::SSH::Perl> is not well maintained nowadays (update: a new
+maintainer has stepped in so this situation could change!!!), requires
+a bunch of modules (some of them very difficult to install) to be
+acceptably efficient and has an API that is limited in some ways.
 
 L<Net::SSH2> is much better than Net::SSH::Perl, but not completely
 stable yet. It can be very difficult to install on some specific
@@ -1717,7 +1749,9 @@ Makes stderr point to stdout.
 
 =item tty => $bool
 
-Tells the remote process that it is connected to a tty.
+Tells ssh to allocate a pseudo-tty for the remote process. By default,
+a tty is allocated if remote command stdin stream is attached to a
+tty.
 
 =item close_slave_pty => 0
 
@@ -1732,6 +1766,13 @@ explicitly closed (see L<IO::Pty>)
 =item quote_args => $bool
 
 See "Shell quoting" below.
+
+=item ssh_opts => \@opts
+
+List of extra options for the C<ssh> command.
+
+This feature should be used with care, as the given options are not
+checked in any way by the module, and they could interfere with it.
 
 =back
 
@@ -1773,8 +1814,13 @@ Accepted options:
 
 =item stdin_data => \@input
 
-Sends the given data to the stdin stream while capturing the output on
-stdout.
+Sends the given data through the stdin stream to the remote
+process.
+
+For example, the following code creates a file on the remote side:
+
+  $ssh->system({stdin_data => @data}, "cat >/tmp/foo")
+    or die "unable to write file: " . $ssh->error;
 
 =item timeout => $timeout
 
@@ -2199,24 +2245,46 @@ alternative quoting method that knows about file wildcards and passes
 them unquoted is used. The set of wildcards recognized currently is
 the one supported by L<bash(1)>.
 
+Another way to selectively use quote globing or fully disable quoting
+for some specific arguments is to pass them as scalar references or
+double scalar references respectively. In practice, that means
+prepending them with one or two backslashes. For instance:
+
+  # quote the last argument for globing:
+  $ssh->system('ls', '-l', \'/tmp/my files/filed_*dat');
+
+  # append a redirection to the remote command
+  $ssh->system('ls', '-lR', \\'>/tmp/ls-lR.txt');
+
+  # expand remote shell variables and glob in the same command:
+  $ssh->system('tar', 'czf', \\'$HOME/out.tgz', \'/var/log/server.*.log');
+
 As shell quoting is a tricky matter, I expect bugs to appear in this
 area. You can see how C<ssh> is called, and the quoting used setting
-the corresponding debug flag:
+the following debug flag:
 
   $Net::OpenSSH::debug |= 16;
 
-Also, the current implementation expects a shell compatible with Unix
-C<sh> in the remote side. It will not work if for instance, the remote
-machine runs Windows, VMS or it is a router.
+Also, the current shell quoting implementation expects a shell
+compatible with Unix C<sh> in the remote side. It will not work as
+expected if for instance, the remote machine runs Windows, VMS or it
+is a router.
+
+As a workaround, do any required quoting yourself and pass the quoted
+command as a string so that no further quoting is performed. For
+instance:
+
+  # for VMS
+  $ssh->system('DIR/SIZE NFOO::USERS:[JSMITH.DOCS]*.TXT;0');
 
 I plan to add support for different quoting mechanisms in the
 future... if you need it now, just ask for it!!!
 
-=head1 Troubleshooting
+=head1 TROUBLESHOOTING
 
 Usually, Net::OpenSSH works out of the box, but when it fails, some
 users have a hard time finding the root of the problem. This
-mini troubleshooting guide shows how to find it.
+mini troubleshooting guide should help to find it.
 
 =over 4
 
