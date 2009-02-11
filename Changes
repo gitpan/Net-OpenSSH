@@ -1,5 +1,10 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.28  Feb 11, 2009
+	- scp methods were broken, regresion introduced on 0.24 (bug
+          report by Ryan Schumacher)
+	- doc chapter about 3rd party module integration
+
 0.27  Feb 5, 2009
 	- better tty feature handling in open_ex, now it defaults to
           ssh default behaviour

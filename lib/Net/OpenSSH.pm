@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.27';
+our $VERSION = '0.28';
 
 use strict;
 use warnings;
@@ -1228,7 +1228,7 @@ sub _scp {
 			     @_);
 
     return $pid if $async;
-    $self->_waitpid("scp operation failed");
+    $self->_waitpid($pid, "scp operation failed");
 }
 
 my %rsync_opt_with_arg = map { $_ => 1 } qw(chmod suffix backup-dir rsync-path max-delete max-size min-size partial-dir
@@ -1308,7 +1308,7 @@ sub _rsync {
     my $pid = $self->open_ex(\%opts_open_ex, @opts, '--', @_);
     return $pid if $async;
 
-    $self->_waitpid($pid) and return 1;
+    $self->_waitpid($pid, "rsync operation failed") and return 1;
 
     if ($self->error == OSSH_SLAVE_CMD_FAILED and $?) {
 	my $err = ($? >> 8);
@@ -2373,6 +2373,35 @@ but you should not use it unless you understand its implications.
 
 =back
 
+=head1 3rd PARTY MODULE INTEGRATION
+
+CPAN contains several modules that rely on SSH to perform their duties
+as for example L<IPC::PerlSSH> or L<GRID::Machine>.
+
+Often, it is possible to instruct them to go through a Net::OpenSSH
+multiplexed connection employing some available constructor
+option. For instance:
+
+  use Net::OpenSSH;
+  use IPC::PerlIPC;
+  my $ssh = Net::OpenSSH->new(...);
+  $ssh->error and die "unable to connect to remote host: " . $ssh->error;
+  my @cmd = $ssh->make_remote_call('/usr/bin/perl');
+  my $ipc = IPC::PerlSSH->new(Command => \@cmd);
+  my @r = $ipc->eval('...');
+
+or...
+
+  use GRID::Machine;
+  ...
+  my @cmd = $ssh->make_remote_call('/usr/bin/perl');
+  my $grid = GRID::Machine->new(command => \@cmd);
+  my $r = $grid->eval('print "hello world!\n"');
+
+In other cases, some kind of plugin mechanism is provided by the 3rd
+party modules to allow for different transports. The method C<open2>
+may be used to create a pair of pipes for transport in these cases.
+
 =head1 SEE ALSO
 
 OpenSSH client documentation: L<ssh(1)>, L<ssh_config(5)>.
@@ -2390,6 +2419,9 @@ on the remote machine.
 
 Other Perl SSH clients: L<Net::SSH::Perl>, L<Net::SSH2>, L<Net::SSH>,
 L<Net::SSH::Expect>, L<Net::SCP>.
+
+L<IPC::PerlSSH>, L<GRID::Machine> allow execution of Perl code in
+remote machines through SSH.
 
 =head1 BUGS AND SUPPORT
 
@@ -2418,8 +2450,6 @@ request for help I get by email!
 - add expect method
 
 - passphrase handling
-
-- integrate with IPC::PerlSSH
 
 - better timeout handling in system and capture methods
 
