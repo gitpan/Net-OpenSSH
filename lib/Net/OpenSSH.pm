@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.28';
+our $VERSION = '0.29';
 
 use strict;
 use warnings;
@@ -1327,7 +1327,7 @@ sub sftp {
     @_ & 1 and croak 'Usage: $ssh->sftp(%sftp_opts)';
 
     $self->_check_master_and_clear_error or return undef;
-    my @call = $self->_make_call([-s => 'sftp']);
+    my @call = $self->_make_call(['-s'], 'sftp');
     _load_module('Net::SFTP::Foreign');
     my $sftp = Net::SFTP::Foreign->new(open2_cmd => \@call,
 				       timeout => $self->{_timeout},
@@ -2447,15 +2447,15 @@ request for help I get by email!
 
 =head1 TODO
 
+- *** add tests for scp, rsync and sftp methods
+
+- *** add support for more target OSs (quoting, OpenVMS, Windows & others)
+
 - add expect method
 
 - passphrase handling
 
 - better timeout handling in system and capture methods
-
-- add support for more target OSs (quoting, OpenVMS, Windows & others)
-
-- add tests for scp and rsync methods
 
 - make C<pipe_in> and C<pipe_out> methods C<open_ex> based
 

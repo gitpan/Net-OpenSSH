@@ -1,7 +1,11 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.29  Feb 12, 2009
+        - sftp method was broken, regression introduced on 0.11 (bug
+          report by Todd E. Rinaldo)
+
 0.28  Feb 11, 2009
-	- scp methods were broken, regresion introduced on 0.24 (bug
+	- scp methods were broken, regression introduced on 0.24 (bug
           report by Ryan Schumacher)
 	- doc chapter about 3rd party module integration
 
