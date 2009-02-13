@@ -1,5 +1,10 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.30  Feb 13, 2009
+	- make sftp open_ex based and add support for stderr_fh and
+          stderr_discard
+	- croak on unaceptable sftp options
+
 0.29  Feb 12, 2009
         - sftp method was broken, regression introduced on 0.11 (bug
           report by Todd E. Rinaldo)

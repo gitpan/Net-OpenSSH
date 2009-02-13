@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.29';
+our $VERSION = '0.30';
 
 use strict;
 use warnings;
@@ -45,10 +45,11 @@ sub _hexdump {
         $good{__PACKAGE__ . "::$sub"} = { map { $_ => 1 } @_ };
     }
 
-    sub _croak_bad_options (\%) {
+    sub _croak_bad_options (\%;$) {
         my $opts = shift;
         if (%$opts) {
-            my $good = $good{(caller 1)[3]};
+	    my $sub = (caller 1)[3];
+            my $good = $good{$sub};
             my @keys = ( $good ? grep !$good->{$_}, keys %$opts : keys %$opts);
             if (@keys) {
                 croak "Invalid or bad combination of options ('" . CORE::join("', '", @keys) . "')";
@@ -402,6 +403,11 @@ sub _connect {
 	$self->_master_redirect('STDOUT');
 	$self->_master_redirect('STDERR');
 
+	if (defined $self->{passwd}) {
+	    delete $ENV{SSH_ASKPASS};
+	    delete $ENV{SSH_AUTH_SOCK};
+	}
+
 	local $SIG{__DIE__};
 	local $SIG{__WARN__};
         eval { exec @call };
@@ -591,7 +597,7 @@ sub _make_pipe {
 
 my %loaded_module;
 sub _load_module {
-    my $module = shift;
+    my ($module, $version) = @_;
     $loaded_module{$module} ||= do {
 	do {
 	    local $SIG{__DIE__};
@@ -600,7 +606,13 @@ sub _load_module {
 	    eval "require $module; 1"
 	} or croak "unable to load Perl module $module";
         1
+    };
+    if (defined $version) {
+	my $mv = eval "\$${module}::VERSION" || 0;
+	croak "$module version $version required, $mv is available"
+	    if $mv < $version;
     }
+    1
 }
 
 sub _arg_quoter {
@@ -1005,7 +1017,7 @@ sub spawn {
     return scalar $self->open_ex(\%opts, @_);
 }
 
-_sub_options open2 => qw(stderr_to_stdout stderr_fh
+_sub_options open2 => qw(stderr_to_stdout stderr_discard stderr_fh
                          quote_args tty ssh_opts);
 sub open2 {
     my $self = shift;
@@ -1316,22 +1328,32 @@ sub _rsync {
 	$errstr = 'Unknown rsync error' unless defined $errstr;
 	my $signal = $? & 255;
 	my $signalstr = ($signal ? " (signal $signal)" : '');
-	$self->_set_error(OSSH_SLAVE_CMD_FAILED, "rsync exited with error code $err$signalstr: $errstr");
+	$self->_set_error(OSSH_SLAVE_CMD_FAILED,
+			  "rsync exited with error code $err$signalstr: $errstr");
     }
     return undef
 }
 
+_sub_options sftp => qw(autoflush timeout fs_encoding
+			block_size queue_size late_set_perm);
 sub sftp {
-    my $self = shift;
-
-    @_ & 1 and croak 'Usage: $ssh->sftp(%sftp_opts)';
-
+    @_ & 1 or croak 'Usage: $ssh->sftp(%sftp_opts)';
+    _load_module('Net::SFTP::Foreign', '1.47');
+    my ($self, %opts) = @_;
+    my $stderr_fh = delete $opts{stderr_fh};
+    my $stderr_discard = delete $opts{stderr_discard};
+    _croak_bad_options %opts;
+    $opts{timeout} = $self->{_timeout} unless defined $opts{timeout};
     $self->_check_master_and_clear_error or return undef;
-    my @call = $self->_make_call(['-s'], 'sftp');
-    _load_module('Net::SFTP::Foreign');
-    my $sftp = Net::SFTP::Foreign->new(open2_cmd => \@call,
-				       timeout => $self->{_timeout},
-				       @_);
+    my ($in, $out, $pid) = $self->open2( { ssh_opts => '-s',
+					   stderr_fh => $stderr_fh,
+					   stderr_discard => $stderr_discard },
+					 'sftp' )
+	or return undef;
+
+    my $sftp = Net::SFTP::Foreign->new(transport => [$out, $in, $pid],
+				       dirty_cleanup => 0,
+				       %opts);
     if ($sftp->error) {
 	$self->_or_set_error(OSSH_SLAVE_SFTP_FAILED, "unable to create SFTP client", $sftp->error);
 	return undef;
