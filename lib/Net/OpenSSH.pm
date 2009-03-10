@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.30';
+our $VERSION = '0.31';
 
 use strict;
 use warnings;
@@ -413,9 +413,10 @@ sub _connect {
         eval { exec @call };
         POSIX::_exit(255);
     }
-    $mpty->close_slave if $mpty;
     $self->{_pid} = $pid;
-    $self->_wait_for_master($async, 1);
+    my $r = $self->_wait_for_master($async, 1);
+    $mpty->close_slave if $mpty;
+    $r;
 }
 
 sub _waitpid {
@@ -609,8 +610,9 @@ sub _load_module {
     };
     if (defined $version) {
 	my $mv = eval "\$${module}::VERSION" || 0;
+	(my $mv1 = $mv) =~ s/_\d*$//;
 	croak "$module version $version required, $mv is available"
-	    if $mv < $version;
+	    if $mv1 < $version;
     }
     1
 }

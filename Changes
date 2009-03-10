@@ -1,9 +1,17 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.31  Mar 3, 2009
+        - password authentication was not working on OS/X (bug report
+          by Niels Larsen)
+        - module loader was generating warnings on development
+          versions (bug report by Todd E. Rinaldo)
+
 0.30  Feb 13, 2009
 	- make sftp open_ex based and add support for stderr_fh and
           stderr_discard
 	- croak on unaceptable sftp options
+	- delete SSH_ASKPASS and SSH_AUTH_SOCK from env. when password
+          authentication is requested
 
 0.29  Feb 12, 2009
         - sftp method was broken, regression introduced on 0.11 (bug
