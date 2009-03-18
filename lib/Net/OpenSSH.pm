@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.31';
+our $VERSION = '0.32';
 
 use strict;
 use warnings;
@@ -245,7 +245,7 @@ sub new {
     }
 
     $self->{_ctl_path} = $ctl_path;
-    $self->_connect;
+    $self->_connect($async);
     $self;
 }
 

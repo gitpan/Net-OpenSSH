@@ -1,5 +1,9 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.32  Mar 18, 2009
+        - async mode was not working in constructor (bug report by
+          Niels Larsen)
+
 0.31  Mar 3, 2009
         - password authentication was not working on OS/X (bug report
           by Niels Larsen)
