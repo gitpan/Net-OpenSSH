@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.32';
+our $VERSION = '0.33';
 
 use strict;
 use warnings;
@@ -85,7 +85,7 @@ sub _check_master_and_clear_error {
 my $obfuscate = sub {
     # just for the casual observer...
     my $txt = shift;
-    $txt =~ s/(.)/chr(ord($1) ^ 47)/ge
+    $txt =~ s/(.)/chr(ord($1) ^ 47)/ges
         if defined $txt;
     $txt;
 };
