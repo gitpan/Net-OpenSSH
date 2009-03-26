@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.33';
+our $VERSION = '0.34';
 
 use strict;
 use warnings;
@@ -910,7 +910,7 @@ sub pipe_out {
     my $self = shift;
     $self->_check_master_and_clear_error or return ();
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
-    my @args = $self->_quote_args(@_);
+    my @args = $self->_quote_args(\%opts, @_);
     _croak_bad_options %opts;
 
     my @call = $self->_make_call([], @args);

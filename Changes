@@ -1,5 +1,8 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.34  Mar 26, 2009
+        - pipe_out was broken (bug report by Matthew Merhar)
+
 0.33  Mar 24, 2009
         - password obfuscation was failing on '%' (bug report by
           Sawyer X)

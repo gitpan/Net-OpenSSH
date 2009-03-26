@@ -62,7 +62,7 @@ if ($ssh->error and $num > 4.7) {
 plan skip_all => 'Unable to establish SSH connection to localhost!'
     if $ssh->error;
 
-plan tests => 21;
+plan tests => 23;
 
 sub shell_quote {
     my $txt = shift;
@@ -111,6 +111,11 @@ is ($output, $lines);
 ($output, $errput) = $ssh->capture2("cat $sq_cwd/test.dat 1>&2");
 is ($errput, $lines);
 is ($output, '');
+
+my $fh = $ssh->pipe_out("cat $sq_cwd/test.dat");
+ok($fh, "pipe_out");
+$output = join('', <$fh>);
+is($output, $lines, "pipe_out lines");
 
 my $string = q(#@$#$%&(@#_)erkljgfd'' 345345' { { / // ///foo);
 
