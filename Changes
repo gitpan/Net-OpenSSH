@@ -1,5 +1,13 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.35  Jun 30, 2009
+	- strict_mode was not working (bug report by wardmw@perlmonks)
+	- documentation correction (error reported by Kevin
+          Mulholland)
+	- Document that the SSH client bundled with your operative
+          system may not be good enough (report by Arun Rajamari).
+	- Add pointer to SSH::Batch in the docs
+
 0.34  Mar 26, 2009
         - pipe_out was broken (bug report by Matthew Merhar)
 

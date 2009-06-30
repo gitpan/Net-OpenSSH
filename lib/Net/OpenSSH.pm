@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.34';
+our $VERSION = '0.35';
 
 use strict;
 use warnings;
@@ -233,11 +233,6 @@ sub new {
     }
     $ctl_dir = File::Spec->catpath((File::Spec->splitpath($ctl_path))[0,1], "");
     $debug and $debug & 2 and _debug "ctl_path: $ctl_path, ctl_dir: $ctl_dir";
-
-    unless ($self->_is_secure_path($ctl_dir)) {
-        $self->_set_error(OSSH_MASTER_FAILED, "ctl_dir $ctl_dir is not secure");
-        return $self;
-    }
 
     if ($strict_mode and !$self->_is_secure_path($ctl_dir)) {
  	$self->_set_error(OSSH_MASTER_FAILED, "ctl_dir $ctl_dir is not secure");
@@ -2340,6 +2335,12 @@ use. For instance:
   $ssh = Net::OpenSSH->new($host,
                            ssh_cmd => "/opt/OpenSSH/5.1/bin/ssh")
 
+Some hardware vendors (i.e. Sun) include custom versions of OpenSSH
+bundled with the operative system. In priciple, Net::OpenSSH should
+work with these SSH clients as long as they are derived from some
+version of OpenSSH recent enough. Anyway, I advise you to use the real
+OpenSSH software if you can!
+
 =item 3 - run ssh from the command line
 
 Check you can connect to the remote host using the same parameters you
@@ -2410,7 +2411,7 @@ option. For instance:
   use IPC::PerlIPC;
   my $ssh = Net::OpenSSH->new(...);
   $ssh->error and die "unable to connect to remote host: " . $ssh->error;
-  my @cmd = $ssh->make_remote_call('/usr/bin/perl');
+  my @cmd = $ssh->make_remote_command('/usr/bin/perl');
   my $ipc = IPC::PerlSSH->new(Command => \@cmd);
   my @r = $ipc->eval('...');
 
@@ -2418,7 +2419,7 @@ or...
 
   use GRID::Machine;
   ...
-  my @cmd = $ssh->make_remote_call('/usr/bin/perl');
+  my @cmd = $ssh->make_remote_command('/usr/bin/perl');
   my $grid = GRID::Machine->new(command => \@cmd);
   my $r = $grid->eval('print "hello world!\n"');
 
@@ -2440,6 +2441,9 @@ L<Net::SFTP::Foreign> provides a compatible SFTP implementation.
 
 L<Expect> can be used to interact with commands run through this module
 on the remote machine.
+
+L<SSH::Batch> allows to run remote commands in parallel in a
+cluster. It is build on top on C<Net::OpenSSH>.
 
 Other Perl SSH clients: L<Net::SSH::Perl>, L<Net::SSH2>, L<Net::SSH>,
 L<Net::SSH::Expect>, L<Net::SCP>.

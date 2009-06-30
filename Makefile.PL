@@ -1,7 +1,7 @@
 use 5.008;
 use ExtUtils::MakeMaker;
 
-warn <<EOW;
+warn <<EOW if 0;
 ============================================================================
 Warning, Net::OpenSSH 0.24 introduced several backward incompatible changes.
 Read the Changes file for the details!!!
