@@ -1,5 +1,11 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.36  Jul 8, 2009
+        - open2pty, open3 and open3pty where not handling transparent
+          options for open_ex, and other minor bugs
+	- pty handling in open_ex was broken
+	- expect sample added
+
 0.35  Jun 30, 2009
 	- strict_mode was not working (bug report by wardmw@perlmonks)
 	- documentation correction (error reported by Kevin

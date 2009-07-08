@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.35';
+our $VERSION = '0.36';
 
 use strict;
 use warnings;
@@ -366,7 +366,6 @@ sub _master_redirect {
 	$fh = $self->{"_default_${name}_fh"} unless defined $fh;
 	if (defined $fh) {
 	    _check_is_system_fh $uname => $fh;
-	    
 	    if (fileno $fh != fileno *$uname) {
 		open *$uname, '>>&', $fh or POSIX::_exit(255);
 	    }
@@ -853,7 +852,7 @@ sub open_ex {
 	    open STDIN, '<', '/dev/null' or POSIX::_exit(255);
 	}
         elsif (defined $rin) {
-            $rin->make_slave_controlling_terminal if $stdin_pty;
+            $win->make_slave_controlling_terminal if $stdin_pty;
 	    unless (fileno $rin == 0) {
 		open STDIN, '<&', $rin or POSIX::_exit(255);
 	    }
@@ -1038,6 +1037,7 @@ sub open2pty {
     my ($pty, undef, undef, $pid) =
         $self->open_ex({ stdout_pty => 1,
                          stdin_pty => 1,
+			 tty => 1,
                        %opts }, @_) or return ();
     return ($pty, $pid);
 }
@@ -1051,7 +1051,8 @@ sub open3 {
     my ($in, $out, $err, $pid) =
         $self->open_ex({ stdout_pipe => 1,
                          stdin_pipe => 1,
-                         stderr_pipe => 1 },
+                         stderr_pipe => 1,
+			 %opts },
                        @_) or return ();
     return ($in, $out, $err, $pid);
 }
@@ -1065,7 +1066,9 @@ sub open3pty {
     my ($pty, undef, $err, $pid) =
         $self->open_ex({ stdout_pty => 1,
                          stdin_pty => 1,
-                         stderr => 1 },
+			 tty => 1,
+                         stderr_pipe => 1,
+			 %opts },
                        @_) or return ();
     return ($pty, $err, $pid);
 }
@@ -2439,8 +2442,9 @@ several methods on this package.
 
 L<Net::SFTP::Foreign> provides a compatible SFTP implementation.
 
-L<Expect> can be used to interact with commands run through this module
-on the remote machine.
+L<Expect> can be used to interact with commands run through this
+module on the remote machine (see also the C<expect.pl> script in the
+sample directory).
 
 L<SSH::Batch> allows to run remote commands in parallel in a
 cluster. It is build on top on C<Net::OpenSSH>.
