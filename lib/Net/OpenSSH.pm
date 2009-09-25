@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.36';
+our $VERSION = '0.38';
 
 use strict;
 use warnings;
@@ -15,7 +15,7 @@ use Scalar::Util ();
 use Errno ();
 use Net::OpenSSH::Constants qw(:error);
 
-sub _debug { print STDERR '# ', @_, "\n" }
+sub _debug { print STDERR '# ', (map { defined($_) ? $_ : '<undef>' } @_), "\n" }
 
 sub _debug_dump {
     require Data::Dumper;
@@ -151,6 +151,9 @@ sub new {
     my $target_os = delete $opts{target_os};
     $target_os = 'unix' unless defined $target_os;
 
+    my $expand_vars = delete $opts{expand_vars};
+    my $vars = delete $opts{vars} || {};
+
     my $master_stdout_fh = delete $opts{master_stdout_fh};
     my $master_stderr_fh = delete $opts{master_stderr_fh};
 
@@ -195,21 +198,27 @@ sub new {
 		     local $SIG{__WARN__};
 		     local $@;
 		     eval { Cwd::realpath((getpwuid $>)[7]) } },
-                 _ssh_opts => \@ssh_opts,
 		 _default_stdin_fh => $default_stdin_fh,
 		 _default_stdout_fh => $default_stdout_fh,
 		 _default_stderr_fh => $default_stderr_fh,
-		 _master_opts => \@master_opts,
 		 _master_stdout_fh => $master_stdout_fh,
 		 _master_stderr_fh => $master_stderr_fh,
 		 _master_stdout_discard => $master_stdout_discard,
 		 _master_stderr_discard => $master_stderr_discard,
-		 _target_os => $target_os };
+		 _target_os => $target_os,
+		 _expand_vars => $expand_vars,
+		 _vars => $vars };
     bless $self, $class;
+
+    $self->{_ssh_opts} = [$self->_expand_vars(@ssh_opts)];
+    $self->{_master_opts} = [$self->_expand_vars(@master_opts)];
+
+    $ctl_path = $self->_expand_vars($ctl_path);
+    $ctl_dir = $self->_expand_vars($ctl_dir);
 
     unless (defined $ctl_path) {
         $ctl_dir = File::Spec->catdir($self->{_home}, ".libnet-openssh-perl")
-            unless defined $ctl_dir;
+	    unless defined $ctl_dir;
 
 	my $old_umask = umask 077;
         mkdir $ctl_dir;
@@ -248,6 +257,39 @@ sub get_user { shift->{_user} }
 sub get_host { shift->{_host} }
 sub get_port { shift->{_port} }
 sub get_ctl_path { shift->{_ctl_path} }
+sub get_expand_vars { shift->{_expand_vars} }
+
+sub set_expand_vars {
+    my $self = shift;
+    $self->{_expand_vars} = !!shift;
+}
+
+sub set_var {
+    my $self = shift;
+    my $k = shift;
+    $k =~ /^(?:USER|HOST|PORT)$/
+	and croak "internal variable %$k% can not be set";
+    $self->{_vars}{$k} = shift;
+}
+
+sub get_var {
+    my ($self, $k) = @_;
+    my $v = ( $k =~ /^(?:USER|HOST|PORT)$/
+	      ? $self->{lc "_$k"}
+	      : $self->{_vars}{$k} );
+    (defined $v ? $v : '');
+}
+
+sub _expand_vars {
+    my ($self, @str) = @_;
+    if ($self->{_expand_vars}) {
+	for (@str) {
+	    s{%(\w*)%}{length ($1) ? $self->get_var($1) : '%'}ge
+		if defined $_;
+	}
+    }
+    wantarray ? @str : $str[0]
+}
 
 sub error { shift->{_error} }
 
@@ -329,13 +371,16 @@ sub _make_rsync_call {
 sub _kill_master {
     my $self = shift;
     my $pid = delete $self->{_pid};
+    $debug and $debug & 32 and _debug '_kill_master: ', $pid;
     if ($pid) {
+	local $SIG{CHLD} = sub {};
         for my $sig (0, 0, 1, 1, 1, 9, 9) {
             if ($sig) {
+		$debug and $debug & 32 and _debug "killing master with signal $sig";
 		kill $sig, $pid
 		    or return;
 	    }
-	    for (1..10) {
+	    for (0..5) {
 		my $r = waitpid($pid, WNOHANG);
 		return if ($r == $pid or $! == Errno::ECHILD);
 		select(undef, undef, undef, 0.2);
@@ -357,7 +402,7 @@ sub _master_redirect {
     my $uname = uc shift;
     my $name = lc $uname;
 
-    no strict 'refs';    
+    no strict 'refs';
     if ($self->{"_master_${name}_discard"}) {
 	open *$uname, '>>', '/dev/null';
     }
@@ -442,7 +487,7 @@ sub _waitpid {
 		return undef
 	    }
 	    warn "Internal error: unexpected error (".($!+0).": $!) from waitpid($pid) = $r. Report it, please!";
-	    
+
 	    # wait a bit before trying again
 	    select(undef, undef, undef, 0.1);
 	}
@@ -461,7 +506,7 @@ sub wait_for_master {
 	return $self->_wait_for_master(@_);
     $self->{_error} == OSSH_MASTER_FAILED and
 	return undef;
-    
+
     unless (-S $self->{_ctl_path}) {
 	$self->_set_error(OSSH_MASTER_FAILED, "master ssh connection broken");
 	return undef;
@@ -636,7 +681,7 @@ sub _quote_args {
     my $quote_extended = delete $opts->{quote_args_extended};
     my $glob_quoting = delete $opts->{glob_quoting};
     $quote = (@_ > 1) unless defined $quote;
-    
+
     if ($quote) {
 	my $quoter_glob = $self->_arg_quoter_glob;
 	my $quoter = ($glob_quoting
@@ -650,10 +695,10 @@ sub _quote_args {
 	for (@_) {
 	    if (ref $_) {
 		if (ref $_ eq 'SCALAR') {
-		    push @quoted, $quoter_glob->($$_);
+		    push @quoted, $quoter_glob->($self->_expand_vars($$_));
 		}
 		if (ref $_ eq 'REF' and ref $$_ eq 'SCALAR') {
-		    push @quoted, $$$_;
+		    push @quoted, $self->_expand_vars($$$_);
 		    undef $quote_extended;
 		}
 		else {
@@ -661,7 +706,7 @@ sub _quote_args {
 		}
 	    }
 	    else {
-		push @quoted, $quoter->($_);
+		push @quoted, $quoter->($self->_expand_vars($_));
 	    }
 	}
 
@@ -681,7 +726,8 @@ sub _quote_args {
 	croak "reference found in argument list when argument quoting is disabled"
 	    if (grep ref, @_);
 
-	wantarray ? @_ : join(" ", @_);
+	my @args = $self->_expand_vars(@_);
+	wantarray ? @args : join(" ", @args);
     }
 }
 
@@ -716,31 +762,62 @@ sub make_remote_command {
     }
 }
 
+sub _open_file {
+    my ($self, $default_mode, $name_or_args, @error_prefix) = @_;
+    my ($mode, @args) = (ref $name_or_args
+			 ? @$name_or_args
+			 : ($default_mode, $name_or_args));
+    @args = $self->_expand_vars(@args);
+    if (open my $fh, $mode, @args) {
+	return $fh;
+    }
+    else {
+	$self->_set_error(OSSH_SLAVE_PIPE_FAILED, @error_prefix,
+			  "Unable to open file '$args[1]': $!");
+	return undef;
+    }
+}
+
 sub open_ex {
     my $self = shift;
     $self->_check_master_and_clear_error or return ();
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
 
-    my ($stdin_discard, $stdin_pipe, $stdin_fh, $stdin_pty);
+    my ($stdin_discard, $stdin_pipe, $stdin_fh, $stdin_file, $stdin_pty);
     ( $stdin_discard = delete $opts{stdin_discard} or
       $stdin_pipe = delete $opts{stdin_pipe} or
       $stdin_pty = delete $opts{stdin_pty} or
-      $stdin_fh = delete $opts{stdin_fh} );
+      $stdin_fh = delete $opts{stdin_fh} or
+      $stdin_file = delete $opts{stdin_file} );
 
-    my ($stdout_discard, $stdout_pipe, $stdout_fh, $stdout_pty);
+    my ($stdout_discard, $stdout_pipe, $stdout_fh, $stdout_file, $stdout_pty);
     ( $stdout_discard = delete $opts{stdout_discard} or
       $stdout_pipe = delete $opts{stdout_pipe} or
       $stdout_pty = delete $opts{stdout_pty} or
-      $stdout_fh = delete $opts{stdout_fh} );
+      $stdout_fh = delete $opts{stdout_fh} or
+      $stdout_file = delete $opts{stdout_file} );
 
     $stdout_pty and !$stdin_pty
         and croak "option stdout_pty requires stdin_pty set";
 
-    my ($stderr_discard, $stderr_pipe, $stderr_fh, $stderr_to_stdout);
+    my ($stderr_discard, $stderr_pipe, $stderr_fh, $stderr_file, $stderr_to_stdout);
     ( $stderr_discard = delete $opts{stderr_discard} or
       $stderr_pipe = delete $opts{stderr_pipe} or
       $stderr_fh = delete $opts{stderr_fh} or
-      $stderr_to_stdout = delete $opts{stderr_to_stdout} );
+      $stderr_to_stdout = delete $opts{stderr_to_stdout} or
+      $stderr_file = delete $opts{stderr_file} );
+
+    my @error_prefix = _array_or_scalar delete $opts{_error_prefix};
+
+    if (defined $stdin_file) {
+	$stdin_fh = $self->_open_file('<', $stdin_file, @error_prefix) or return
+    }
+    if (defined $stdout_file) {
+	$stdout_fh = $self->_open_file('>', $stdout_file, @error_prefix) or return
+    }
+    if (defined $stderr_file) {
+	$stderr_fh = $self->_open_file('>', $stderr_file, @error_prefix) or return
+    }
 
     my $tty = delete $opts{tty};
     my $close_slave_pty;
@@ -749,12 +826,10 @@ sub open_ex {
         $close_slave_pty = delete $opts{close_slave_pty};
         $close_slave_pty = 1 unless defined $close_slave_pty;
     }
-    my @ssh_opts = _array_or_scalar delete $opts{ssh_opts};
+    my @ssh_opts = $self->_expand_vars(_array_or_scalar delete $opts{ssh_opts});
 
     my $cmd = delete $opts{_cmd};
     $cmd = 'ssh' unless defined $cmd;
-
-    my @error_prefix = delete $opts{_error_prefix};
 
     $opts{quote_args_extended} = 1
 	if (!defined $opts{quote_args_extended} and $cmd eq 'ssh');
@@ -1003,8 +1078,9 @@ sub _io3 {
     return ($bout, $berr);
 }
 
-_sub_options spawn => qw(stderr_to_stdout stdin_discard stdin_fh stdout_discard stdout_fh
-                         stderr_discard stderr_fh quote_args tty ssh_opts);
+_sub_options spawn => qw(stderr_to_stdout stdin_discard stdin_fh stdin_file stdout_discard
+                         stdout_fh stdout_file stderr_discard stderr_fh stderr_file
+                         quote_args tty ssh_opts);
 sub spawn {
     my $self = shift;
     my %opts =  (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -1013,8 +1089,8 @@ sub spawn {
     return scalar $self->open_ex(\%opts, @_);
 }
 
-_sub_options open2 => qw(stderr_to_stdout stderr_discard stderr_fh
-                         quote_args tty ssh_opts);
+_sub_options open2 => qw(stderr_to_stdout stderr_discard stderr_fh stderr_file quote_args
+                         tty ssh_opts);
 sub open2 {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -1027,7 +1103,7 @@ sub open2 {
     return ($in, $out, $pid);
 }
 
-_sub_options open2pty => qw(stderr_to_stdout stderr_discard stderr_fh
+_sub_options open2pty => qw(stderr_to_stdout stderr_discard stderr_fh stderr_file
                             quote_args tty close_slave_pty ssh_opts);
 sub open2pty {
     my $self = shift;
@@ -1073,8 +1149,9 @@ sub open3pty {
     return ($pty, $err, $pid);
 }
 
-_sub_options system => qw(stdout_discard stdout_fh stdin_discard stdin_fh quote_args
-                          stderr_to_stdout stderr_discard stderr_fh tty ssh_opts);
+_sub_options system => qw(stdout_discard stdout_fh stdin_discard stdout_file stdin_fh
+                          stdin_file quote_args stderr_to_stdout stderr_discard stderr_fh
+                          stderr_file tty ssh_opts);
 sub system {
     my $self = shift;
     $self->_check_master_and_clear_error or return -1;
@@ -1095,8 +1172,8 @@ sub system {
     $self->_waitpid($pid);
 }
 
-_sub_options capture => qw(stderr_to_stdout stderr_discard stderr_fh stdin_discard stdin_fh
-                           quote_args tty ssh_opts);
+_sub_options capture => qw(stderr_to_stdout stderr_discard stderr_fh stderr_file
+                           stdin_discard stdin_fh stdin_file quote_args tty ssh_opts);
 sub capture {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -1119,7 +1196,7 @@ sub capture {
     $output
 }
 
-_sub_options capture2 => qw(stdin_discard stdin_fh quote_args tty ssh_opts);
+_sub_options capture2 => qw(stdin_discard stdin_fh stdin_file quote_args tty ssh_opts);
 sub capture2 {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -1212,7 +1289,9 @@ sub rsync_put {
     $self->_rsync($opts, @src, $target);
 }
 
-_sub_options _scp => qw(stderr_to_stdout stderr_discard stderr_fh stdout_discard stdout_fh);
+_sub_options _scp => qw(stderr_to_stdout stderr_discard stderr_fh
+			stderr_file stdout_discard stdout_fh
+			stdout_file);
 sub _scp {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -1276,8 +1355,10 @@ my %rsync_error = (1, 'syntax or usage error',
 		   30, 'timeout in data send/receive',
 		   35, 'timeout waiting for daemon connection');
 
-my %rsync_opt_open_ex = map { $_ => 1 } qw(stderr_to_stdout stderr_discard stderr_fh stdout_discard stdout_fh);
-
+my %rsync_opt_open_ex = map { $_ => 1 } qw(stderr_to_stdout
+					   stderr_discard stderr_fh
+					   stderr_file stdout_discard
+					   stdout_fh stdout_file);
 sub _rsync {
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -1368,7 +1449,13 @@ sub DESTROY {
     if ($pid) {
         local $?;
 	local $!;
-        $self->_master_ctl('exit');
+
+	unless ($self->{_wfm_status}) {
+	    # we have successfully created the master connection so we
+	    # can send control commands:
+	    $debug and $debug & 32 and _debug("sending exit control to master");
+	    $self->_master_ctl('exit');
+	}
 	$self->_kill_master;
     }
 }
@@ -1507,7 +1594,7 @@ instance, these two method calls are equivalent:
 
 Most methods return undef (or an empty list) to indicate failure.
 
-The C<error> method can always be used to explicitly check for
+The L</error> method can always be used to explicitly check for
 errors. For instace:
 
   my ($output, $errput) = $ssh->capture2({timeout => 1}, "find /");
@@ -1516,9 +1603,6 @@ errors. For instace:
 =head2 Net::OpenSSH methods
 
 These are the methods provided by the package:
-
-  *** Note that this is an early release, the ***
-  *** module API has not yet stabilized!!!    ***
 
 =over 4
 
@@ -1671,6 +1755,16 @@ Redirect corresponding stdio streams to given filehandles.
 
 Discard corresponding stdio streams.
 
+=item expand_vars => $bool
+
+Activates variable expansion inside command arguments and file paths.
+
+See L</"Variable expansion"> below.
+
+=item vars => \%vars
+
+Initial set of variables.
+
 =back
 
 =item $ssh->error
@@ -1732,6 +1826,18 @@ written faster than it is read.
 
 Duplicates C<$fh> and uses it as the stdin stream of the remote process.
 
+=item stdin_file => $filename
+
+=item stdin_file => \@open_args
+
+Opens the file of the given name for reading and uses it as the remote
+process stdin stream.
+
+If an array reference is passed its contents are used as the arguments
+for the underlying open call. For instance:
+
+  $ssh->system({stdin_file => ['-|', 'gzip -c -d file.gz']}, $rcmd);
+
 =item stdin_discard => 1
 
 Uses /dev/null as the remote process stdin stream.
@@ -1751,6 +1857,12 @@ pseudo-pty. This option requires C<stdin_pty> to be also set.
 
 Duplicates C<$fh> and uses it as the stdout stream of the remote process.
 
+=item stdout_file => $filename
+
+=item stdout_file => \@open_args
+
+Opens the file of the given filename and redirect stdout there.
+
 =item stdout_discard => 1
 
 Uses /dev/null as the remote process stdout stream.
@@ -1764,6 +1876,10 @@ value.
 =item stderr_fh => $fh
 
 Duplicates C<$fh> and uses it as the stderr stream of the remote process.
+
+=item stderr_file => $filename
+
+Opens the file of the given name and redirects stderr there.
 
 =item stderr_to_stdout => 1
 
@@ -1787,7 +1903,7 @@ explicitly closed (see L<IO::Pty>)
 
 =item quote_args => $bool
 
-See "Shell quoting" below.
+See L</"Shell quoting"> below.
 
 =item ssh_opts => \@opts
 
@@ -1863,7 +1979,7 @@ Note that when this option is combined with C<stdin_data>, the given
 data will be transferred to the remote side before returning control
 to the caller.
 
-See also the C<spawn> method documentation below.
+See also the L</spawn> method documentation below.
 
 =item stdin_fh => $fh
 
@@ -1881,7 +1997,7 @@ See also the C<spawn> method documentation below.
 
 =item tty => $bool
 
-See the C<open_ex> method documentation for an explanation of these
+See the L</open_ex> method documentation for an explanation of these
 options.
 
 =back
@@ -1900,7 +2016,7 @@ L<perlvar/"$/">).
 
 When an error happens while capturing (for instance, the operation
 times out), the partial captured output will be returned. Error
-conditions have to be explicitly checked using the C<error>
+conditions have to be explicitly checked using the L</error>
 method. For instance:
 
   my $output = $ssh->capture({ timeout => 10 },
@@ -1919,7 +2035,7 @@ Accepted options:
 
 =item timeout => $timeout
 
-See the C<system> method documentation for an explanation of these
+See the L</system> method documentation for an explanation of these
 options.
 
 =item stdin_fh => $fh
@@ -1934,7 +2050,7 @@ options.
 
 =item tty => $bool
 
-See the C<open_ex> method documentation for an explanation of these
+See the L</open_ex> method documentation for an explanation of these
 options.
 
 =back
@@ -1954,7 +2070,7 @@ The accepted options are:
 
 =item timeout => $timeout
 
-See the C<system> method documentation for an explanation of these
+See the L</system> method documentation for an explanation of these
 options.
 
 =item stdin_fh => $fh
@@ -1963,7 +2079,7 @@ options.
 
 =item tty => $bool
 
-See the C<open_ex> method documentation for an explanation of these
+See the L</open_ex> method documentation for an explanation of these
 options.
 
 =back
@@ -2006,11 +2122,11 @@ No options are currently accepted.
 
 =item ($pty, $err, $pid) = $ssh->open3pty(\%opts, @cmd)
 
-Shortcuts around C<open_ex> method.
+Shortcuts around L</open_ex> method.
 
 =item $pid = $ssh->spawn(\%opts, @_)
 
-Another C<open_ex> shortcut, it launches a new remote process in the
+Another L</open_ex> shortcut, it launches a new remote process in the
 background and returns its PID.
 
 For instance, you can run some command on several host in parallel
@@ -2042,7 +2158,7 @@ instance:
   $ssh->scp_get({glob => 1}, '/var/tmp/foo*', '/var/tmp/bar*', '/tmp');
   $ssh->scp_put('/etc/passwd');
 
-Both C<scp_get> and C<scp_put> methods return a true value when all
+Both L</scp_get> and L</scp_put> methods return a true value when all
 the files are transferred correctly, otherwise they return undef.
 
 Accepted options:
@@ -2066,8 +2182,8 @@ wildcards can be used to select files.
 
 =item glob_flags => $flags
 
-Second argument passed to L<File::Glob> C<bsd_glob> function. Only
-available for C<scp_put> method.
+Second argument passed to L<File::Glob::bsd_glob|File::Glob/bsd_glob> function. Only
+available for L</scp_put> method.
 
 =item copy_attrs => 1
 
@@ -2114,7 +2230,7 @@ parallel as follows:
 
 =item stderr_to_stdout => 1
 
-These options are passed unchanged to method C<open_ex>, allowing
+These options are passed unchanged to method L</open_ex>, allowing
 capture of the output of the scp program.
 
 Note that C<scp> will not generate progress reports unless its stdout
@@ -2146,7 +2262,7 @@ For instance:
 
 =item $sftp = $ssh->sftp(%sftp_opts)
 
-Creates a new L<Net::SFTP::Foreign> object for SFTP interaction that
+Creates a new L<Net::SFTP::Foreign|Net::SFTP::Foreign> object for SFTP interaction that
 runs through the ssh master connection.
 
 =item @call = $ssh->make_remote_command(%opts, @cmd)
@@ -2178,8 +2294,8 @@ process and wait until the multiplexing socket is available.
 
 It returns a true value after the connection has been succesfully
 established. False is returned if the connection process fails or if
-it has not yet completed (C<$ssh-E<gt>error> can be used to
-distinguish between those cases).
+it has not yet completed (then, the L</error> method can be used to
+distinguish between both cases).
 
 =item $ssh->shell_quote(@args)
 
@@ -2188,13 +2304,28 @@ their original form when parsed by the remote shell.
 
 In scalar context returns the list of arguments quoted and joined.
 
-Usually this task is done automatically by the module. See "Shell
-quoting" below.
+Usually this task is done automatically by the module. See L</"Shell
+quoting"> below.
 
 =item $ssh->shell_quote_glob(@args)
 
 This method is like the previous C<shell_quote> but leaves wildcard
 characters unquoted.
+
+=item $ssh->set_expand_vars($bool)
+
+Enables/disables variable expansion feature.
+
+=item $ssh->get_expand_vars
+
+Returns current state of variable expansion feature.
+
+=item $ssh->set_var($name, $value)
+
+=item $ssh->get_var($name, $value)
+
+These methods allow to change and to retrieve the value of the logical
+value of the given name.
 
 =back
 
@@ -2213,7 +2344,7 @@ L<perlfunc/system>:
   to the system's command shell for parsing (this is "/bin/sh -c" on
   Unix platforms, but varies on other platforms).
 
-Take for example Net::OpenSSH C<system> method:
+Take for example Net::OpenSSH L</system> method:
 
   $ssh->system("ls -l *");
   $ssh->system('ls', '-l', '/');
@@ -2301,6 +2432,33 @@ instance:
 
 I plan to add support for different quoting mechanisms in the
 future... if you need it now, just ask for it!!!
+
+=head2 Variable expansion
+
+The variable expansion feature allows to define variables that are
+expanded automatically inside command arguments and file paths.
+
+This feature is disabled by default as it is intended to be used with
+L<Net::OpenSSH::Parallel> and other similar modules.
+
+Variables are delimited by a pair of percent signs (C<%>), for
+instance C<%HOST%>. Also, two consecutive percent signs are replaced
+by a single one.
+
+The special variables C<HOST>, C<USER> and C<PORT> are maintained
+internally by the module and take the obvious values.
+
+Variable expansion is performed before shell quoting (see L</"Shell
+quoting">).
+
+Some usage example:
+
+  my $ssh = Net::OpenSSH->new('server.foo.com', expand_vars => 1);
+  $ssh->set_var(ID => 42);
+  $ssh->system("ls >/tmp/ls.out-%HOST%-%ID%");
+
+will redirect the output of the C<ls> command to
+C</tmp/ls.out-server.foo.com-42> on the remote host.
 
 =head1 TROUBLESHOOTING
 
@@ -2457,7 +2615,7 @@ remote machines through SSH.
 
 =head1 BUGS AND SUPPORT
 
-SCP and rsync file transfer support is still highly experimental.
+Variable expansion feature is highly experimental.
 
 Does not work on Windows. OpenSSH multiplexing feature requires
 passing file handles through sockets but that is not supported by
@@ -2466,7 +2624,7 @@ Windows.
 Doesn't work on VMS either... well, actually, it probably doesn't work
 on anything not resembling a modern Linux/Unix OS.
 
-Tested on Linux and NetBSD with OpenSSH 5.1p1
+Tested on Linux, OpenBSD and NetBSD with OpenSSH 5.1 and 5.2.
 
 To report bugs or give me some feedback, send an email to the address
 that appear below or use the CPAN bug tracking system at
@@ -2477,21 +2635,22 @@ L<http://perlmoks.org/>> (that I read frequently). This module is
 becoming increasingly popular and I am unable to cope with all the
 request for help I get by email!
 
+The source code of this module is hosted at GitHub:
+L<http://github.com/salva/p5-Net-OpenSSH>
+
 =head1 TODO
 
 - *** add tests for scp, rsync and sftp methods
 
 - *** add support for more target OSs (quoting, OpenVMS, Windows & others)
 
-- add expect method
-
 - passphrase handling
 
 - better timeout handling in system and capture methods
 
-- make C<pipe_in> and C<pipe_out> methods C<open_ex> based
+- make L</pipe_in> and L</pipe_out> methods L</open_ex> based
 
-- add scp_cat and similar methods
+- add C<scp_cat> and similar methods
 
 - write some kind of parallel queue manager module
 
