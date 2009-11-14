@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.39';
+our $VERSION = '0.40';
 
 use strict;
 use warnings;
@@ -434,13 +434,17 @@ sub _connect {
     my ($self, $async) = @_;
     $self->_set_error;
 
+    my @master_opts = (@{$self->{_master_opts}}, '-xMN');
+
     my $mpty;
     if (defined $self->{_passwd}) {
         _load_module('IO::Pty');
         $self->{_mpty} = $mpty = IO::Pty->new;
+	push @master_opts, (-o => 'NumberOfPasswordPrompts=1',
+			    -o => 'PreferredAuthentications=password');
     }
 
-    my @call = $self->_make_call([@{$self->{_master_opts}}, '-xMN']);
+    my @call = $self->_make_call(\@master_opts);
 
     local $SIG{CHLD};
     my $pid = fork;
@@ -659,6 +663,9 @@ sub _load_module {
         1
     };
     if (defined $version) {
+	local $SIG{__DIE__};
+	local $SIG{__WARN__};
+	local $@;
 	my $mv = eval "\$${module}::VERSION" || 0;
 	(my $mv1 = $mv) =~ s/_\d*$//;
 	croak "$module version $version required, $mv is available"
@@ -1460,6 +1467,7 @@ sub DESTROY {
     if ($pid) {
         local $?;
 	local $!;
+	local $@;
 
 	unless ($self->{_wfm_status}) {
 	    # we have successfully created the master connection so we
@@ -2484,7 +2492,7 @@ instead of the alias, the full path to the command must be used.
 The variable expansion feature allows to define variables that are
 expanded automatically inside command arguments and file paths.
 
-This feature is disabled by default as it is intended to be used with
+This feature is disabled by default. It is intended to be used with
 L<Net::OpenSSH::Parallel|Net::OpenSSH::Parallel> and other similar
 modules.
 
@@ -2510,8 +2518,8 @@ C</tmp/ls.out-server.foo.com-42> on the remote host.
 =head1 TROUBLESHOOTING
 
 Usually, Net::OpenSSH works out of the box, but when it fails, some
-users have a hard time finding the root of the problem. This
-mini troubleshooting guide should help to find it.
+users have a hard time finding the cause of the problem. This mini
+troubleshooting guide should help to find and solve it.
 
 =over 4
 
@@ -2608,6 +2616,20 @@ but you should not use it unless you understand its implications.
 
 =head1 3rd PARTY MODULE INTEGRATION
 
+=head2 Expect
+
+Sometimes you would like to use L<Expect> to control some program
+running in the remote host. You can do it as follows:
+
+  my ($pty, $pid) = $ssh->open2pty(@cmd)
+      or die "unable to run remote command @cmd";
+  my $expect = Expect->init($pty);
+
+Then, you will be able to use the new Expect object in C<$expect> as
+usual.
+
+=head2 Other modules
+
 CPAN contains several modules that rely on SSH to perform their duties
 as for example L<IPC::PerlSSH|IPC::PerlSSH> or
 L<GRID::Machine|GRID::Machine>.
@@ -2653,8 +2675,12 @@ L<Expect|Expect> can be used to interact with commands run through
 this module on the remote machine (see also the C<expect.pl> script in
 the sample directory).
 
+L<SSH::OpenSSH::Parallel> is an advanced scheduler that allows to run
+commands in remote hosts in parallel. It is obviously based on
+L<Net::OpenSSH>.
+
 L<SSH::Batch|SSH::Batch> allows to run remote commands in parallel in
-a cluster. It is build on top on C<Net::OpenSSH>.
+a cluster. It is build on top on C<Net::OpenSSH> also.
 
 Other Perl SSH clients: L<Net::SSH::Perl|Net::SSH::Perl>,
 L<Net::SSH2|Net::SSH2>, L<Net::SSH|Net::SSH>,
@@ -2705,7 +2731,9 @@ L<http://github.com/salva/p5-Net-OpenSSH>
 
 - add C<scp_cat> and similar methods
 
-- write some kind of parallel queue manager module
+- async disconnect
+
+- currently wait_for_master does not honor timeout
 
 Send your feature requests, ideas or any feedback, please!
 
