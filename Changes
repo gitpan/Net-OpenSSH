@@ -1,6 +1,7 @@
 Revision history for Perl extension Net::OpenSSH.
 
-0.41_01 Nov 16, 2009
+0.41_02 Nov 16, 2009
+	- Some bits where missing from 0.40
 	- Allow also keyboard-interactive authentication when password
           is given (bug report by Todd E. Rinaldo)
 
