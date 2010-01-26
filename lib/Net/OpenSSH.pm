@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.43';
+our $VERSION = '0.44';
 
 use strict;
 use warnings;
@@ -1388,8 +1388,8 @@ sub _rsync {
 
     my @opts = qw(--blocking-io) ;
     push @opts, '-q' if $quiet;
-    push @opts, '-v' if $verbose;
     push @opts, '-p' if $copy_attrs;
+    push @opts, '-' . ($verbose =~ /^\d+$/ ? 'v' x $verbose : 'v') if $verbose;
 
     my %opts_open_ex = ( _cmd => 'rsync',
 			 _error_prefix => 'rsync command failed',
@@ -1405,7 +1405,7 @@ sub _rsync {
 		my $opt1 = $opt;
 		$opt1 =~ tr/_/-/;
 		$rsync_opt_forbiden{$opt1} and croak "forbiden rsync option '$opt' used";
-		if ($rsync_opt_with_arg{$opt}) {
+		if ($rsync_opt_with_arg{$opt1}) {
 		    push @opts, "--$opt1=$_" for _array_or_scalar($value)
 		}
 		else {
@@ -1915,6 +1915,10 @@ Tells ssh to allocate a pseudo-tty for the remote process. By default,
 a tty is allocated if remote command stdin stream is attached to a
 tty.
 
+When this flag is set and stdin is not attached to a tty, the ssh
+master and slave processes may generate spurious warnings about failed
+tty operations. This is a bug on OpenSSH.
+
 =item close_slave_pty => 0
 
 When a pseudo pty is used for the stdin stream, the slave side is
@@ -2282,7 +2286,6 @@ For instance:
                    verbose => 1,
                    safe_links => 1},
                   '/remote/dir', '/local/dir');
-
 
 =item $sftp = $ssh->sftp(%sftp_opts)
 
