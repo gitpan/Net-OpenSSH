@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.44';
+our $VERSION = '0.45';
 
 use strict;
 use warnings;
@@ -58,6 +58,40 @@ sub _hexdump {
     }
 }
 
+sub _tcroak {
+    if (${^TAINT} > 0) {
+	push @_, " while running with -T switch";
+        goto &croak;
+    }
+    if (${^TAINT} < 0) {
+	push @_, " while running with -t switch";
+        goto &carp;
+    }
+}
+
+sub _catch_tainted_args {
+    my $i;
+    for (@_) {
+        next unless $i++;
+        if (Scalar::Util::tainted $_) {
+            my (undef, undef, undef, $subn) = caller 1;
+            my $msg = ( $subn =~ /::([a-z]\w*)$/
+                        ? "Insecure argument '$_' on '$1' method call"
+                        : "Insecure argument '$_' on method call" );
+            _tcroak($msg);
+        }
+        elsif (ref($_) eq 'HASH') {
+            for (grep Scalar::Util::tainted $_, values %$_) {
+		my (undef, undef, undef, $subn) = caller 1;
+		my $msg = ( $subn =~ /::([a-z]\w*)$/
+			    ? "Insecure argument on '$1' method call"
+			    : "Insecure argument on method call" );
+		_tcroak($msg);
+            }
+        }
+    }
+}
+
 sub _set_error {
     my $self = shift;
     my $code = shift || 0;
@@ -92,9 +126,10 @@ my $obfuscate = sub {
 my $deobfuscate = $obfuscate;
 
 # regexp from Regexp::IPv6
-my $IPv6_re = qr{:(?::[\da-f]{1,4}){0,5}(?:(?::[\da-f]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})))|[\da-f]{1,4}:(?:[\da-f]{1,4}:(?:[\da-f]{1,4}:(?:[\da-f]{1,4}:(?:[\da-f]{1,4}:(?:[\da-f]{1,4}:(?:[\da-f]{1,4}:(?:[\da-f]{1,4}|:)|:(?:[\da-f]{1,4})?)|(?:(?::[\da-f]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))?))|(?::[\da-f]{1,4})?(?:(?::[\da-f]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))?))|(?::[\da-f]{1,4}){0,2}(?:(?::[\da-f]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))?))|(?::[\da-f]{1,4}){0,3}(?:(?::[\da-f]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))?))|(?::[\da-f]{1,4}){0,4}(?:(?::[\da-f]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))?))}i;
+my $IPv6_re = qr((?-xism::(?::[0-9a-fA-F]{1,4}){0,5}(?:(?::[0-9a-fA-F]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})))|[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}|:)|(?::(?:[0-9a-fA-F]{1,4})?|(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))))|:(?:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))|[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4})?|))|(?::(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))|:[0-9a-fA-F]{1,4}(?::(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))|(?::[0-9a-fA-F]{1,4}){0,2})|:))|(?:(?::[0-9a-fA-F]{1,4}){0,2}(?::(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))|(?::[0-9a-fA-F]{1,4}){1,2})|:))|(?:(?::[0-9a-fA-F]{1,4}){0,3}(?::(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))|(?::[0-9a-fA-F]{1,4}){1,2})|:))|(?:(?::[0-9a-fA-F]{1,4}){0,4}(?::(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))|(?::[0-9a-fA-F]{1,4}){1,2})|:))));
 
 sub new {
+    ${^TAINT} and &_catch_tainted_args;
     my $class = shift;
     @_ & 1 and unshift @_, 'host';
     my %opts = @_;
@@ -182,6 +217,19 @@ sub new {
     push @ssh_opts, -o => "User=$user" if defined $user;
     push @ssh_opts, -o => "Port=$port" if defined $port;
 
+    my $home = do {
+	local $SIG{__DIE__};
+	local $SIG{__WARN__};
+	local $@;
+	eval { Cwd::realpath((getpwuid $>)[7]) }
+    };
+
+    if (${^TAINT}) {
+	($home) = $home =~ /^(.*)$/;
+	Scalar::Util::tainted($ENV{PATH}) and
+		_tcroak('Insecure $ENV{PATH}');
+    }
+
     my $self = { _error => 0,
                  _ssh_cmd => $ssh_cmd,
 		 _scp_cmd => $scp_cmd,
@@ -193,11 +241,7 @@ sub new {
                  _port => $port,
                  _passwd => $obfuscate->($passwd),
                  _timeout => $timeout,
-                 _home => do {
-		     local $SIG{__DIE__};
-		     local $SIG{__WARN__};
-		     local $@;
-		     eval { Cwd::realpath((getpwuid $>)[7]) } },
+                 _home => $home,
 		 _default_stdin_fh => $default_stdin_fh,
 		 _default_stdout_fh => $default_stdout_fh,
 		 _default_stderr_fh => $default_stderr_fh,
@@ -266,6 +310,7 @@ sub set_expand_vars {
 }
 
 sub set_var {
+    ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     my $k = shift;
     $k =~ /^(?:USER|HOST|PORT)$/
@@ -499,7 +544,7 @@ sub _waitpid {
 	    next if $! == Errno::EINTR();
 	    if ($! == Errno::ECHILD) {
 		$self->_or_set_error(OSSH_SLAVE_FAILED,
-				     @_, "child process $pid does not exists", $!);
+				     @_, "child process $pid does not exist", $!);
 		return undef
 	    }
 	    warn "Internal error: unexpected error (".($!+0).": $!) from waitpid($pid) = $r. Report it, please!";
@@ -686,6 +731,7 @@ sub _arg_quoter {
 sub _arg_quoter_glob {
     sub {
 	my $arg = shift;
+	return "''" if $arg eq '';
         $arg =~ s|(?<!\\)([^\w/\-+=*?\[\],{}:\@!.^\\~])|\\$1|g;
 	$arg;
     }
@@ -797,6 +843,7 @@ sub _open_file {
 }
 
 sub open_ex {
+    ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     $self->_check_master_and_clear_error or return ();
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -980,6 +1027,7 @@ sub open_ex {
 }
 
 sub pipe_in {
+    ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     $self->_check_master_and_clear_error or return ();
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -994,6 +1042,7 @@ sub pipe_in {
 }
 
 sub pipe_out {
+    ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     $self->_check_master_and_clear_error or return ();
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -1100,6 +1149,7 @@ _sub_options spawn => qw(stderr_to_stdout stdin_discard stdin_fh stdin_file stdo
                          stdout_fh stdout_file stderr_discard stderr_fh stderr_file
                          quote_args tty ssh_opts);
 sub spawn {
+    ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     my %opts =  (ref $_[0] eq 'HASH' ? %{shift()} : ());
     _croak_bad_options %opts;
@@ -1110,6 +1160,7 @@ sub spawn {
 _sub_options open2 => qw(stderr_to_stdout stderr_discard stderr_fh stderr_file quote_args
                          tty ssh_opts);
 sub open2 {
+    ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     _croak_bad_options %opts;
@@ -1124,6 +1175,7 @@ sub open2 {
 _sub_options open2pty => qw(stderr_to_stdout stderr_discard stderr_fh stderr_file
                             quote_args tty close_slave_pty ssh_opts);
 sub open2pty {
+    ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     _croak_bad_options %opts;
@@ -1138,6 +1190,7 @@ sub open2pty {
 
 _sub_options open3 => qw(quote_args tty ssh_opts);
 sub open3 {
+    ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     _croak_bad_options %opts;
@@ -1153,6 +1206,7 @@ sub open3 {
 
 _sub_options open3pty => qw(quote_args tty close_slave_pty ssh_opts);
 sub open3pty {
+    ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     _croak_bad_options %opts;
@@ -1171,6 +1225,7 @@ _sub_options system => qw(stdout_discard stdout_fh stdin_discard stdout_file std
                           stdin_file quote_args stderr_to_stdout stderr_discard stderr_fh
                           stderr_file tty ssh_opts);
 sub system {
+    ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     $self->_check_master_and_clear_error or return -1;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
@@ -1193,6 +1248,7 @@ sub system {
 _sub_options capture => qw(stderr_to_stdout stderr_discard stderr_fh stderr_file
                            stdin_discard stdin_fh stdin_file quote_args tty ssh_opts);
 sub capture {
+    ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $stdin_data = delete $opts{stdin_data};
@@ -1216,6 +1272,7 @@ sub capture {
 
 _sub_options capture2 => qw(stdin_discard stdin_fh stdin_file quote_args tty ssh_opts);
 sub capture2 {
+    ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $stdin_data = delete $opts{stdin_data};
@@ -1259,11 +1316,13 @@ sub _scp_get_args {
 }
 
 sub scp_get {
+    ${^TAINT} and &_catch_tainted_args;
     my ($self, $opts, $target, @src) = _scp_get_args @_;
     $self->_scp($opts, @src, $target);
 }
 
 sub rsync_get {
+    ${^TAINT} and &_catch_tainted_args;
     my ($self, $opts, $target, @src) = _scp_get_args @_;
     $self->_rsync($opts, @src, $target);
 }
@@ -1298,11 +1357,13 @@ sub _scp_put_args {
 }
 
 sub scp_put {
+    ${^TAINT} and &_catch_tainted_args;
     my ($self, $opts, $target, @src) = _scp_put_args @_;
     $self->_scp($opts, @src, $target);
 }
 
 sub rsync_put {
+    ${^TAINT} and &_catch_tainted_args;
     my ($self, $opts, $target, @src) = _scp_put_args @_;
     $self->_rsync($opts, @src, $target);
 }
@@ -1436,6 +1497,7 @@ sub _rsync {
 _sub_options sftp => qw(autoflush timeout fs_encoding
 			block_size queue_size late_set_perm);
 sub sftp {
+    ${^TAINT} and &_catch_tainted_args;
     @_ & 1 or croak 'Usage: $ssh->sftp(%sftp_opts)';
     _load_module('Net::SFTP::Foreign', '1.47');
     my ($self, %opts) = @_;
@@ -1463,11 +1525,11 @@ sub sftp {
 sub DESTROY {
     my $self = shift;
     my $pid = $self->{_pid};
-    $debug and $debug & 2 and _debug("DESTROY($self, pid => ".(defined $pid ? $pid : undef).")");
+    local $@;
+    $debug and $debug & 2 and _debug("DESTROY($self, pid => ".(defined $pid ? $pid : '<undef>').")");
     if ($pid) {
         local $?;
 	local $!;
-	local $@;
 
 	unless ($self->{_wfm_status}) {
 	    # we have successfully created the master connection so we
@@ -1969,8 +2031,10 @@ Example:
   $ssh->system('ls -R /')
     or die "ls failed: " . $ssh->error";
 
-As for C<system> builtin, C<SIGINT> and C<SIGQUIT> signals are blocked
-(see L<perlfunc/system>).
+As for C<system> builtin, C<SIGINT> and C<SIGQUIT> signals are
+blocked.  (see L<perlfunc/system>). Also, setting C<$SIG{CHLD}> to
+C<IGNORE> or to a custom signal handler will interfere with this
+method.
 
 Accepted options:
 
@@ -2053,6 +2117,9 @@ method. For instance:
       warn "operation didn't complete successfully: ". $ssh->error;
   print $output;
 
+Setting C<$SIG{CHLD}> to a custom signal handler or to C<IGNORE> will
+interfere with this method.
+
 Accepted options:
 
 =over 4
@@ -2087,6 +2154,9 @@ options.
 
 captures the output sent to both stdout and stderr by C<@cmd> on the
 remote machine.
+
+Setting C<$SIG{CHLD}> to a custom signal handler or to C<IGNORE> will
+also interfere with this method.
 
 The accepted options are:
 
@@ -2403,13 +2473,12 @@ Take for example Net::OpenSSH L</system> method:
   $ssh->system("ls -l *");
   $ssh->system('ls', '-l', '/');
 
-The first call passes the argument unchanged to ssh, so that it is
-executed in the remote side through the shell which interprets shell
-metacharacters.
+The first call passes the argument unchanged to ssh and it is executed
+in the remote side through the shell which interprets metacharacters.
 
-The second call escapes especial shell characters so that,
-effectively, it is equivalent to calling the command directly and not
-through the shell.
+The second call escapes any shell metacharacters so that, effectively,
+it is equivalent to calling the command directly and not through the
+shell.
 
 Under the hood, as the Secure Shell protocol does not provide for this
 mode of operation and always spawns a new shell where it runs the
@@ -2727,6 +2796,18 @@ man-in-the-middle attacks, etc.
 I advice you to do not use that option unless you fully understand its
 implications from a security point of view.
 
+=item child process 14947 does not exist: No child processes
+
+B<Q>: Calls to C<system>, C<capture> or C<capture2> fail with the
+previous error, what I am doing wrong?
+
+B<A>: That usually happens when C<$SIG{CHLD}> is set to C<IGNORE> or
+to some custom handler reaping child processes by itself. In order to
+solve the problem just disable the handler during the method call:
+
+  local $SIG{CHLD};
+  $ssh->system($cmd);
+
 =back
 
 =head1 SEE ALSO
@@ -2765,7 +2846,7 @@ C<Net::OpenSSH> to handle the connections.
 
 =head1 BUGS AND SUPPORT
 
-Variable expansion feature is highly experimental.
+Taint mode support is still in experimental state.
 
 Does not work on Windows. OpenSSH multiplexing feature requires
 passing file handles through sockets something that is not supported
@@ -2822,7 +2903,8 @@ Send your feature requests, ideas or any feedback, please!
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2008, 2009 by Salvador FandiE<ntilde>o (sfandino@yahoo.com)
+Copyright (C) 2008-2010 by Salvador FandiE<ntilde>o
+(sfandino@yahoo.com)
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself, either Perl version 5.10.0 or,
