@@ -1,5 +1,19 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.46_02
+	- add suport for default_stdin_file, default_stdin_discard and
+          similar options
+        - add stdinout_socket feature and open2socket shortcut method
+        - rename some internal methods to more meaningfull names
+        - add open_tunnel and capture_tunnel methods
+	- add support for tunnel feature and docs
+	- document mod_perl/mod_perl2 integration
+	- document not-a-real-file-handle errors
+	- some minor doc updates
+	- run tests with StrictHostKeyChecking=no
+        - disable tty allocation for control commands
+        - better debugging for _io3
+
 0.46_01  Mar 25, 2010
         - do not depend on STDIN, STDOUT and STDERR being file
           descriptors 0, 1, and 2 respectively as it happens, for
@@ -10,8 +24,8 @@ Revision history for Perl extension Net::OpenSSH.
         - set stdin_discard to when running control commands as it may
           be closed or tied
         - better debugging for waitpid and _io3
-        - error in example in documentation solved (reported by Slaven
-          Rezic)
+        - error in example in documentation corrected (reported by
+          Slaven Rezic)
 
 0.45  Feb 17, 2010
 	- support for taint mode
