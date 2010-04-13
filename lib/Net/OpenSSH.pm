@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.46_02';
+our $VERSION = '0.47';
 
 use strict;
 use warnings;
@@ -1935,11 +1935,11 @@ For instance:
   $ssh->scp_put("/foo/bar*", "/tmp")
     or die "scp failed: " . $ssh->error;
 
-=item default_stdin_fine = $fn
+=item default_stdin_file = $fn
 
-=item default_stdout_fine = $fn
+=item default_stdout_file = $fn
 
-=item default_stderr_fine = $fn
+=item default_stderr_file = $fn
 
 Opens the given filenames and use it as the defaults.
 
@@ -2386,14 +2386,14 @@ with the following code:
 
 =item ($socket, $pid) = $ssh->open_tunnel(\%opts, $dest_host, $port)
 
-Similar to L</open2socket>, but instead of running a command, it opens a TCP
+X<open_tunnel>Similar to L</open2socket>, but instead of running a command, it opens a TCP
 tunnel to the given address. See also L</Tunnels>.
 
 =item $out = $ssh->capture_tunnel(\%opts, $dest_host, $port)
 
 =item @out = $ssh->capture_tunnel(\%opts, $dest_host, $port)
 
-Similar to L</capture>, but instead of running a command, it opens a
+X<capture_tunnel>Similar to L</capture>, but instead of running a command, it opens a
 TCP tunnel.
 
 Example:
@@ -2495,26 +2495,25 @@ parallel as follows:
 =item stderr_to_stdout => 1
 
 These options are passed unchanged to method L</open_ex>, allowing
-capture of the output of the scp program.
+capture of the output of the C<scp> program.
 
 Note that C<scp> will not generate progress reports unless its stdout
 stream is attached to a tty.
 
 =back
 
-
 =item $ssh->rsync_get(\%opts, $remote1, $remote2,..., $local_dir_or_file)
 
 =item $ssh->rsync_put(\%opts, $local1, $local2,..., $remote_dir_or_file)
 
-These methods use rsync over SSH to transfer files from/to the remote
+These methods use C<rsync> over SSH to transfer files from/to the remote
 machine.
 
 They accept the same set of options as the SCP ones.
 
 Any unrecognized option will be passed as an argument to the C<rsync>
-command. Underscores can be used instead of dashes in C<rsync> option
-names.
+command (see L<rsync(1)>). Underscores can be used instead of dashes
+in C<rsync> option names.
 
 For instance:
 
@@ -2762,10 +2761,9 @@ server.
 
 That feature is made available through the C<tunnel> option of the
 L</open_ex> method, and also through wrapper methods L</open_tunnel>
-and L</capture_tunnel>.
+and L</capture_tunnel> and most others where it makes sense.
 
-The C<tunnel> option is also supported by the L</open_ex> wrapper
-methods where it makes sense. For instance:
+Example:
 
   $ssh->system({tunnel => 1,
                 stdin_data => "GET / HTTP/1.0\r\n\r\n",
@@ -2803,7 +2801,81 @@ tunnel have been closed.
 
 OpenSSH 5.4 or later is required for the tunnels functionality to
 work. Also, note that tunnel forwarding may be administratively
-forbidden at the server side.
+forbidden at the server side (see L<sshd(8)> and L<sshd_config(5)> or
+the documentation provided by your SSH server vendor).
+
+=head1 3rd PARTY MODULE INTEGRATION
+
+=head2 Expect
+
+Sometimes you would like to use L<Expect> to control some program
+running in the remote host. You can do it as follows:
+
+  my ($pty, $pid) = $ssh->open2pty(@cmd)
+      or die "unable to run remote command @cmd";
+  my $expect = Expect->init($pty);
+
+Then, you will be able to use the new Expect object in C<$expect> as
+usual.
+
+=head2 mod_perl and mod_perl2
+
+L<mod_perl> and L<mod_perl2> tie STDIN and STDOUT to objects that are
+not backed up by real file descriptors at the operative system
+level. Net::OpenSSH will fail if any of these handles is used
+explicetly or implicitly when calling some remote command.
+
+The workaround is to redirect them to C</dev/null> or to some file:
+
+  open my $def_in, '<', '/dev/null' or die "unable to open /dev/null";
+  my $ssh = Net::OpenSSH->new($host,
+                              default_stdin_fh => $def_in);
+
+  my $out = $ssh->capture($cmd1);
+  $ssh->system({stdout_discard => 1}, $cmd2);
+  $ssh->system({stdout_to_file => '/tmp/output'}, $cmd3);
+
+Also, note that from a security stand point, running ssh from inside
+the webserver process is not a great idea. An attacker exploiting some
+Apache bug would be able to access the ssh keys and passwords and gain
+unlimited access to the remote systems.
+
+If you can, use a queue (as L<TheSchwartz|TheSchwartz>) or any other
+mechanism to execute the ssh commands from another process running
+under a different user account.
+
+At a minimum, ensure that C<~www-data/.ssh> (or similar) is not
+accessible through the web server!
+
+=head2 Other modules
+
+CPAN contains several modules that rely on SSH to perform their duties
+as for example L<IPC::PerlSSH|IPC::PerlSSH> or
+L<GRID::Machine|GRID::Machine>.
+
+Often, it is possible to instruct them to go through a Net::OpenSSH
+multiplexed connection employing some available constructor
+option. For instance:
+
+  use Net::OpenSSH;
+  use IPC::PerlIPC;
+  my $ssh = Net::OpenSSH->new(...);
+  $ssh->error and die "unable to connect to remote host: " . $ssh->error;
+  my @cmd = $ssh->make_remote_command('/usr/bin/perl');
+  my $ipc = IPC::PerlSSH->new(Command => \@cmd);
+  my @r = $ipc->eval('...');
+
+or...
+
+  use GRID::Machine;
+  ...
+  my @cmd = $ssh->make_remote_command('/usr/bin/perl');
+  my $grid = GRID::Machine->new(command => \@cmd);
+  my $r = $grid->eval('print "hello world!\n"');
+
+In other cases, some kind of plugin mechanism is provided by the 3rd
+party modules to allow for different transports. The method C<open2>
+may be used to create a pair of pipes for transport in these cases.
 
 =head1 TROUBLESHOOTING
 
@@ -2904,79 +2976,6 @@ but you should not use it unless you understand its implications.
 
 =back
 
-=head1 3rd PARTY MODULE INTEGRATION
-
-=head2 Expect
-
-Sometimes you would like to use L<Expect> to control some program
-running in the remote host. You can do it as follows:
-
-  my ($pty, $pid) = $ssh->open2pty(@cmd)
-      or die "unable to run remote command @cmd";
-  my $expect = Expect->init($pty);
-
-Then, you will be able to use the new Expect object in C<$expect> as
-usual.
-
-=head2 mod_perl and mod_perl2
-
-L<mod_perl> and L<mod_perl2> tie STDIN and STDOUT to objects that are
-not backed up by real file descriptors at the operative system
-level. Net::OpenSSH will fail if any of these handles is used
-explicetly or implicitly when calling some remote command.
-
-The workaround is to redirect them to C</dev/null> or to some file:
-
-  open my $def_in, '<', '/dev/null' or die "unable to open /dev/null";
-  my $ssh = Net::OpenSSH->new($host,
-                              default_stdin_fh => $def_in);
-
-  my $out = $ssh->capture($cmd1);
-  $ssh->system({stdout_discard => 1}, $cmd2);
-  $ssh->system({stdout_to_file => '/tmp/output'}, $cmd3);
-
-Also, note that from a security stand point, running ssh from inside
-the webserver process is not a great idea. An attacker exploiting some
-Apache bug would be able to access the ssh keys and passwords and gain
-unlimited access to the remote systems.
-
-If you can, use a queue (as L<TheSchwartz|TheSchwartz>) or any other
-mechanism to execute the ssh commands from another process running
-under a different user account.
-
-At a minimum, ensure that C<~www-data/.ssh> (or similar) is not
-accessible through the web server!
-
-=head2 Other modules
-
-CPAN contains several modules that rely on SSH to perform their duties
-as for example L<IPC::PerlSSH|IPC::PerlSSH> or
-L<GRID::Machine|GRID::Machine>.
-
-Often, it is possible to instruct them to go through a Net::OpenSSH
-multiplexed connection employing some available constructor
-option. For instance:
-
-  use Net::OpenSSH;
-  use IPC::PerlIPC;
-  my $ssh = Net::OpenSSH->new(...);
-  $ssh->error and die "unable to connect to remote host: " . $ssh->error;
-  my @cmd = $ssh->make_remote_command('/usr/bin/perl');
-  my $ipc = IPC::PerlSSH->new(Command => \@cmd);
-  my @r = $ipc->eval('...');
-
-or...
-
-  use GRID::Machine;
-  ...
-  my @cmd = $ssh->make_remote_command('/usr/bin/perl');
-  my $grid = GRID::Machine->new(command => \@cmd);
-  my $r = $grid->eval('print "hello world!\n"');
-
-In other cases, some kind of plugin mechanism is provided by the 3rd
-party modules to allow for different transports. The method C<open2>
-may be used to create a pair of pipes for transport in these cases.
-
 =head1 FAQ
 
 Frequent questions about the module:
@@ -3069,12 +3068,38 @@ to a real file:
 
 See also the L<mod_perl> entry above.
 
+=item Solaris (and AIX and probably others)
+
+B<Q>: I was trying Net::OpenSSH on Solaris and seem to be running into
+an issue...
+
+B<A>: The SSH client bundled with Solaris is an early fork of OpenSSH
+that does not provide the multiplexing functionality required by
+Net::OpenSSH. You will have to install the OpenSSH client.
+
+Precompiled packages are available from Sun Freeware
+(L<http://www.sunfreeware.com>). There, select your OS version an CPU
+architecture, download the OpenSSH package and its dependencies and
+install them. Note that you do B<not> need to configure Solaris to use
+the OpenSSH server C<sshd>.
+
+Ensure that OpenSSH client is in your path before the system C<ssh> or
+alternatively, you can hardcode the full path into your scripts
+as follows:
+
+  $ssh = Net::OpenSSH->new($host,
+                           ssh_cmd => '/usr/local/bin/ssh');
+
+AIX and probably some other unixen, also bundle SSH clients lacking the
+multiplexing functionality and require installation of OpenSSH.
+
 =back
 
 =head1 SEE ALSO
 
-OpenSSH client documentation L<ssh(1)>, L<ssh_config(5)> and the
-project web: L<http://www.openssh.org>.
+OpenSSH client documentation L<ssh(1)>, L<ssh_config(5)>, the project
+web L<http://www.openssh.org> and its FAQ
+L<http://www.openbsd.org/openssh/faq.html>. L<scp(1)> and L<rsync(1)>.
 
 Core perl documentation L<perlipc>, L<perlfunc/open>,
 L<perlfunc/waitpid>.
@@ -3091,7 +3116,7 @@ the sample directory).
 
 L<SSH::OpenSSH::Parallel> is an advanced scheduler that allows to run
 commands in remote hosts in parallel. It is obviously based on
-L<Net::OpenSSH>.
+Net::OpenSSH.
 
 L<SSH::Batch|SSH::Batch> allows to run remote commands in parallel in
 a cluster. It is build on top on C<Net::OpenSSH> also.
@@ -3108,9 +3133,10 @@ C<Net::OpenSSH> to handle the connections.
 
 =head1 BUGS AND SUPPORT
 
-Support for tunnel forwarding is experimental.
+Support for tunnel forwarding is experimental and requires OpenSSH 5.4
+or later.
 
-Suppoet for taint mode is still experimental.
+Support for taint mode is still experimental.
 
 Tested on Linux, OpenBSD and NetBSD with OpenSSH 5.1 to 5.4.
 
