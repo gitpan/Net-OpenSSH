@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.47';
+our $VERSION = '0.48';
 
 use strict;
 use warnings;
@@ -253,6 +253,7 @@ sub new {
     }
 
     my $self = { _error => 0,
+		 _perl_pid => $$,
                  _ssh_cmd => $ssh_cmd,
 		 _scp_cmd => $scp_cmd,
 		 _rsync_cmd => $rsync_cmd,
@@ -359,7 +360,7 @@ sub get_var {
 
 sub _expand_vars {
     my ($self, @str) = @_;
-    if ($self->{_expand_vars}) {
+    if (ref $self and $self->{_expand_vars}) {
 	for (@str) {
 	    s{%(\w*)%}{length ($1) ? $self->get_var($1) : '%'}ge
 		if defined $_;
@@ -806,7 +807,7 @@ sub _quote_args {
 		if (ref $_ eq 'SCALAR') {
 		    push @quoted, $quoter_glob->($self->_expand_vars($$_));
 		}
-		if (ref $_ eq 'REF' and ref $$_ eq 'SCALAR') {
+		elsif (ref $_ eq 'REF' and ref $$_ eq 'SCALAR') {
 		    push @quoted, $self->_expand_vars($$$_);
 		    undef $quote_extended;
 		}
@@ -882,7 +883,7 @@ sub _open_file {
     }
     else {
 	$self->_set_error(OSSH_SLAVE_PIPE_FAILED, @error_prefix,
-			  "Unable to open file '$args[1]': $!");
+			  "Unable to open file '$args[0]': $!");
 	return undef;
     }
 }
@@ -1631,6 +1632,7 @@ sub sftp {
 sub DESTROY {
     my $self = shift;
     my $pid = $self->{_pid};
+    my $perl_pid = $self->{_perl_pid};
     local $@;
     $debug and $debug & 2 and _debug("DESTROY($self, pid => ".(defined $pid ? $pid : '<undef>').")");
     if ($pid) {
@@ -1787,7 +1789,7 @@ instance, these two method calls are equivalent:
 Most methods return undef (or an empty list) to indicate failure.
 
 The L</error> method can always be used to explicitly check for
-errors. For instace:
+errors. For instance:
 
   my ($output, $errput) = $ssh->capture2({timeout => 1}, "find /");
   $ssh->error and die "ssh failed: " . $ssh->error;
@@ -2569,14 +2571,24 @@ In scalar context returns the list of arguments quoted and joined.
 Usually this task is done automatically by the module. See L</"Shell
 quoting"> below.
 
+This method can also be used as a class method.
+
+Example:
+
+  my $quoted_args = Net::OpenSSH->shell_quote(@args);
+  system('ssh', '--', $host, $quoted_args);
+
 =item $ssh->shell_quote_glob(@args)
 
 This method is like the previous C<shell_quote> but leaves wildcard
 characters unquoted.
 
+It can be used as a class method also.
+
 =item $ssh->set_expand_vars($bool)
 
-Enables/disables variable expansion feature.
+Enables/disables variable expansion feature (see L</"Variable
+expansion">).
 
 =item $ssh->get_expand_vars
 
@@ -2904,14 +2916,14 @@ Ensure that you have a version of C<ssh> recent enough:
 
 OpenSSH version 4.1 was the first to support the multiplexing feature
 and is the minimal required by the module to work. I advise you to use
-the latest OpenSSH (currently 5.4) or at least a more recent
+the latest OpenSSH (currently 5.5) or at least a more recent
 version.
 
 The C<ssh_cmd> constructor option lets you select the C<ssh> binary to
 use. For instance:
 
   $ssh = Net::OpenSSH->new($host,
-                           ssh_cmd => "/opt/OpenSSH/5.4/bin/ssh")
+                           ssh_cmd => "/opt/OpenSSH/5.5/bin/ssh")
 
 Some hardware vendors (i.e. Sun) include custom versions of OpenSSH
 bundled with the operative system. In priciple, Net::OpenSSH should
@@ -3093,6 +3105,36 @@ as follows:
 AIX and probably some other unixen, also bundle SSH clients lacking the
 multiplexing functionality and require installation of OpenSSH.
 
+=item Can't change working directory
+
+B<Q>: I want to run some command inside a given remote directory but I
+am unable to change the remote working directory. For instance:
+
+  $ssh->system('cd /home/foo/bin');
+  $ssh->systen('ls');
+
+does not list the contents of C</home/foo/bin>.
+
+What am I doing wrong?
+
+B<A>: Net::OpenSSH (and, for that matter, all the SSH modules
+available from CPAN but L<Net::SSH::Expect>) runs every command in a
+new session so most shell builtins that are run for its side effects
+become useless (i.e. C<cd>, C<export>, C<ulimit>, C<umask>, etc.,
+usually, you can list them runing help from the shell).
+
+A work around is to combine several commands in one, for instance:
+
+  $ssh->system('cd /home/foo/bin && ls');
+
+Note the use of the shell C<&&> operator instead of C<;> in order to
+abort the command as soon as any of the subcommands fail.
+
+Also, several commands can be combine into one while still using the
+multi-argument quoting feature as follows:
+
+  $ssh->system(@cmd1, \\'&&', @cmd2, \\'&&', @cmd3, ...);
+
 =back
 
 =head1 SEE ALSO
@@ -3138,7 +3180,7 @@ or later.
 
 Support for taint mode is still experimental.
 
-Tested on Linux, OpenBSD and NetBSD with OpenSSH 5.1 to 5.4.
+Tested on Linux, OpenBSD and NetBSD with OpenSSH 5.1 to 5.5.
 
 Net::OpenSSH does not work on Windows. OpenSSH multiplexing feature
 requires passing file handles through sockets something that is not
@@ -3147,14 +3189,13 @@ supported by any version of Windows.
 It doesn't work on VMS either... well, probably, it doesn't work on
 anything not resembling a modern Linux/Unix OS.
 
-To report bugs or give me some feedback, send an email to the address
-that appear below or use the CPAN bug tracking system at
-L<http://rt.cpan.org>.
+To report bugs send an email to the address that appear below or use
+the CPAN bug tracking system at L<http://rt.cpan.org>.
 
-B<Do not send me questions related to the usage of the module by email
-but post them in PerlMonks L<http://perlmoks.org/>> (that I read
-frequently). This module is becoming increasingly popular and I am
-unable to cope with all the request for help I get!
+B<Post questions related to how to use the module in Perlmonks>
+L<http://perlmoks.org/>, you will probably get faster responses that
+if you address me directly and I visit Perlmonks quite often, so I
+will see your question anyway.
 
 The source code of this module is hosted at GitHub:
 L<http://github.com/salva/p5-Net-OpenSSH>.
