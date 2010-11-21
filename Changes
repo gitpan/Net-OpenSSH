@@ -1,9 +1,14 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.50  Nov 21, 2010
+        - shell_quote in t/1_run.t was escaping '_' (bug report by
+          Andreas J. König)
+	- some typos corrected
+        - initial implementation of scp_cat
+
 0.49  Aug 7, 2010
 	- do not kill master from forked processes (bug report by
           scotchie at PerlMonks)
-	- some typos corrected
 
 0.48  Aug 2, 2010
         - bug quoting escaped scalars as globs solved

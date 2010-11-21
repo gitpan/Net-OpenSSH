@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.49';
+our $VERSION = '0.50';
 
 use strict;
 use warnings;
@@ -1040,12 +1040,12 @@ sub open_ex {
     $debug and $debug & 16 and _debug_dump open_ex => \@call;
 
     my $pid = fork;
-    unless (defined $pid) {
-        $self->_set_error(OSSH_SLAVE_FAILED,  @error_prefix,
-			  "unable to fork new ssh slave: $!");
-        return ();
-    }
     unless ($pid) {
+        unless (defined $pid) {
+            $self->_set_error(OSSH_SLAVE_FAILED,  @error_prefix,
+                              "unable to fork new ssh slave: $!");
+            return ();
+        }
         $stdin_discard  and (open $rin,  '<', '/dev/null' or POSIX::_exit(255));
         $stdout_discard and (open $wout, '>', '/dev/null' or POSIX::_exit(255));
         $stderr_discard and (open $werr, '>', '/dev/null' or POSIX::_exit(255));
