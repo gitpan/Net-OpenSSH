@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.51_01';
+our $VERSION = '0.51_02';
 
 use strict;
 use warnings;
@@ -474,11 +474,8 @@ sub _kill_master {
     my $pid = delete $self->{_pid};
     $debug and $debug & 32 and _debug '_kill_master: ', $pid;
     if ($pid) {
-	require POSIX;
-	my $KILL = POSIX::SIGKILL();
-	my $TERM = POSIX::SIGTERM();
 	local $SIG{CHLD} = sub {};
-        for my $sig (0, 0, $TERM, $TERM, $TERM, $KILL, $KILL) {
+        for my $sig (0, 0, 'TERM', 'TERM', 'TERM', 'KILL', 'KILL') {
             if ($sig) {
 		$debug and $debug & 32 and _debug "killing master with signal $sig";
 		kill $sig, $pid
@@ -577,7 +574,7 @@ sub _waitpid {
 
     $? = 0;
     if ($pid) {
-        $timeout = $self->{timeout} unless defined $timeout;
+        $timeout = $self->{_timeout} unless defined $timeout;
 
         my $time_limit;
         if (defined $timeout and $self->{_kill_ssh_on_timeout}) {
@@ -699,27 +696,25 @@ sub _wait_for_master {
                 return undef;
             }
             my $check = $self->_master_ctl('check');
-            if ($check =~ /pid=(\d+)/) {
-                unless ($pid == $1) {
-                    $self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix,
-                                      "bad ssh master at $ctl_path, socket owned by pid $1 (pid $pid expected)");
-                    $self->_kill_master;
-                    return undef;
-                }
-                return 1;
+            my $error;
+            if (not defined $check) {
+                $error = "execution of control command failed: " . $self->error;
+            }
+            elsif ($check =~ /pid=(\d+)/) {
+                return 1 if $pid == $1;
+
+                $error = "bad ssh master at $ctl_path, socket owned by pid $1 (pid $pid expected)";
             }
 	    elsif ($check =~ /illegal option/i) {
-		$self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix,
-				  "OpenSSH 4.1 or later required");
-		$self->_kill_master;
-		return undef;
+                $error = "OpenSSH 4.1 or later required";
 	    }
 	    else {
-		$self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix,
-				  "Unknown error");
-		$self->_kill_master;
-		return undef;
+                $error = "Unknown error";
 	    }
+
+            $self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix, $error);
+            $self->_kill_master;
+            return undef;
         }
         if (waitpid($pid, WNOHANG) == $pid or $! == Errno::ECHILD) {
             $self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix,
@@ -941,6 +936,29 @@ sub _fileno_dup_dangerous {
     undef;
 }
 
+sub _make_dpipe {
+    my ($self, $cmd, $io, $err) = @_;
+    my $pid = fork;
+    unless ($pid) {
+        eval {
+            defined $pid or die "Unable to create new process: $!";
+            my $io_fd  = _fileno_dup_dangerous(3 => $io);
+            my $err_fd = _fileno_dup_dangerous(3 => $err);
+            POSIX::dup2($io_fd, 0);
+            POSIX::dup2($io_fd, 1);
+            POSIX::dup2($err_fd, 2) if defined $err_fd;
+            if (ref $cmd) {
+                exec @$cmd;
+            }
+            else {
+                exec $cmd;
+            }
+        };
+        POSIX::_exit(255);
+    }
+    return $pid;
+}
+
 sub open_ex {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -949,11 +967,12 @@ sub open_ex {
 
     my $tunnel = delete $opts{tunnel};
 
+    my $stdinout_dpipe = delete $opts{stdinout_dpipe};
+    my $stdinout_socket = (defined $stdinout_dpipe ? 1 : delete $opts{stdinout_socket});
+
     my ($stdin_discard, $stdin_pipe, $stdin_fh, $stdin_file, $stdin_pty,
         $stdout_discard, $stdout_pipe, $stdout_fh, $stdout_file, $stdout_pty,
         $stderr_discard, $stderr_pipe, $stderr_fh, $stderr_file, $stderr_to_stdout);
-
-    my $stdinout_socket = delete $opts{stdinout_socket};
     unless ($stdinout_socket) {
         ( $stdin_discard = delete $opts{stdin_discard} or
           $stdin_pipe = delete $opts{stdin_pipe} or
@@ -1086,9 +1105,14 @@ sub open_ex {
                               "unable to fork new ssh slave: $!");
             return ();
         }
+
         $stdin_discard  and (open $rin,  '<', '/dev/null' or POSIX::_exit(255));
         $stdout_discard and (open $wout, '>', '/dev/null' or POSIX::_exit(255));
         $stderr_discard and (open $werr, '>', '/dev/null' or POSIX::_exit(255));
+
+        if ($stdinout_dpipe) {
+            $self->_make_dpipe($stdinout_dpipe, $win, $werr) or POSIX::_exit(255);
+        }
 
         my $rin_fd = _fileno_dup_dangerous(0 => $rin);
         my $wout_fd = _fileno_dup_dangerous(1 => $wout);
@@ -1111,6 +1135,7 @@ sub open_ex {
         POSIX::_exit(255);
     }
     $win->close_slave() if $close_slave_pty;
+    undef $win if defined $stdinout_dpipe;
     wantarray ? ($win, $rout, $rerr, $pid) : $pid;
 }
 
@@ -1250,7 +1275,7 @@ sub _io3 {
 
 _sub_options spawn => qw(stderr_to_stdout stdin_discard stdin_fh stdin_file stdout_discard
                          stdout_fh stdout_file stderr_discard stderr_fh stderr_file
-                         quote_args tty ssh_opts tunnel);
+                         stdinout_dpipe quote_args tty ssh_opts tunnel);
 sub spawn {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1342,7 +1367,7 @@ sub open3pty {
 
 _sub_options system => qw(stdout_discard stdout_fh stdin_discard stdout_file stdin_fh
                           stdin_file quote_args stderr_to_stdout stderr_discard stderr_fh
-                          stderr_file tty ssh_opts tunnel);
+                          stderr_file stdinout_dpipe tty ssh_opts tunnel);
 sub system {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1361,6 +1386,32 @@ sub system {
     $self->_io3(undef, undef, $in, $stdin_data, $timeout) if defined $stdin_data;
     return $pid if $async;
     $self->_waitpid($pid, $timeout);
+}
+
+_sub_options test => qw(stdout_discard stdout_fh stdin_discard stdout_file stdin_fh
+                        stdin_file quote_args stderr_to_stdout stderr_discard stderr_fh
+                        stderr_file stdinout_dpipe tty ssh_opts timeout stdin_data);
+
+sub test {
+    ${^TAINT} and &_catch_tainted_args;
+    my $self = shift;
+    my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
+    $opts{stdout_discard} = 1 unless grep defined($opts{$_}), qw(stdout_discard stdout_fh
+                                                                 stdout_file);
+    $opts{stderr_discard} = 1 unless grep defined($opts{$_}), qw(stderr_discard stderr_fh
+                                                                 stderr_file stderr_to_stdout);
+    _croak_bad_options %opts;
+
+    $self->system(\%opts, @_);
+    my $error = $self->error;
+    unless ($error) {
+        return 1;
+    }
+    if ($error == OSSH_SLAVE_CMD_FAILED) {
+        $self->_set_error(0);
+        return 0;
+    }
+    return undef;
 }
 
 _sub_options capture => qw(stderr_to_stdout stderr_discard stderr_fh stderr_file
@@ -1921,14 +1972,14 @@ other event happening on methods that are not immediate (for instance,
 when establishing the master SSH connection or inside methods
 C<capture>, C<system>, C<scp_get>, etc.).
 
-See also </Timeouts>.
+See also L</Timeouts>.
 
 =item kill_ssh_on_timeout => 1
 
 This option tells Net::OpenSSH to kill the local slave SSH process
 when some operation times out.
 
-See also </Timeouts>.
+See also L</Timeouts>.
 
 =item strict_mode => 0
 
@@ -2134,11 +2185,24 @@ Example:
 
 See also L</open2socket>.
 
+=item stdinout_dpipe => $cmd
+
+=item stdinout_dpipe => \@cmd
+
+Runs the given command locally attaching its stdio streams to those of
+the remote SSH command. Conceptually it is equivalent to the
+L<dpipe(1)> shell command.
+
 =item stderr_pipe => 1
 
 Creates a new pipe and connects the writting side to the stderr stream
 of the remote process. The reading side is returned as the third
 value (C<$err>).
+
+Example:
+
+  my $pid = $ssh->open_ex({stdinout_dpipe => 'vncviewer -stdio'},
+                          x11vnc => '-inetd');
 
 =item stderr_fh => $fh
 
@@ -2278,12 +2342,40 @@ See also the L</spawn> method documentation below.
 
 =item stderr_to_stdout => $bool
 
+=item stdinout_dpipe => $cmd
+
 =item tty => $bool
 
 See the L</open_ex> method documentation for an explanation of these
 options.
 
 =back
+
+=item $ok = $ssh->test(\%opts, @cmd);
+
+Runs the given command and returns its success/failure exit status as
+1 or 0 respectively. Returns undef when something goes wrong in the
+SSH layer.
+
+Error status is not set to OSSH_SLAVE_CMD_FAILED when the remote
+command exits with a non-zero code.
+
+By default this method discards the remote command C<stdout> and
+C<sterr> streams.
+
+Usage example:
+
+  if ($ssh->test(ps => -C => $executable)) {
+    say "$executable is running on remote machine"
+  }
+  else {
+    die "something got wrong: ". $ssh->error if $ssh->error;
+
+    say "$executable is not running on remote machine"
+  }
+
+This method support the same set of options as C<system>, except
+C<async> and C<tunnel>.
 
 =item $output = $ssh->capture(\%opts, @cmd);
 
@@ -2418,13 +2510,16 @@ Shortcuts around L</open_ex> method.
 
 =item $pid = $ssh->spawn(\%opts, @_)
 
-Another L</open_ex> shortcut, it launches a new remote process in the
-background and returns its PID.
+X<spawn>Another L</open_ex> shortcut, it launches a new remote process
+in the background and returns the PID of the local slave SSH process.
 
-For instance, you can run some command on several host in parallel
+At some later point in your script, C<waitpid> should be called on the
+returned PID in order to reap the slave SSH process.
+
+For instance, you can run some command on several hosts in parallel
 with the following code:
 
-  my %conn = map { $_ => Net::OpenSSH->new($_) } @hosts;
+  my %conn = map { $_ => Net::OpenSSH->new($_, async => 1) } @hosts;
   my @pid;
   for my $host (@hosts) {
       open my($fh), '>', "/tmp/out-$host.txt"
@@ -2434,10 +2529,15 @@ with the following code:
 
   waitpid($_, 0) for @pid;
 
+Note that C<spawn> shouldn't be used to start detached remote
+processes that may survive the local program (see also the L</FAQ>
+about running remote processes detached).
+
 =item ($socket, $pid) = $ssh->open_tunnel(\%opts, $dest_host, $port)
 
-X<open_tunnel>Similar to L</open2socket>, but instead of running a command, it opens a TCP
-tunnel to the given address. See also L</Tunnels>.
+X<open_tunnel>Similar to L</open2socket>, but instead of running a
+command, it opens a TCP tunnel to the given address. See also
+L</Tunnels>.
 
 =item $out = $ssh->capture_tunnel(\%opts, $dest_host, $port)
 
@@ -2814,7 +2914,7 @@ so this approach does not always work.
 =item * killing the local SSH slave process
 
 This action may leave the remote process running, creating a remote
-orphan so Net::OpenSSH does not uses it unless the construction option
+orphan so Net::OpenSSH does not use it unless the construction option
 C<kill_ssh_on_timeout> is set.
 
 =back
@@ -3063,7 +3163,7 @@ They have to be owned by the user executing the script or by root
 
 =item *
 
-Their permission masks have to be 0755 or more restrictive, so nobody
+Their permission masks must be 0755 or more restrictive, so nobody
 else has permissions to perform write operations on them.
 
 =back
@@ -3219,6 +3319,25 @@ Also, several commands can be combined into one while still using the
 multi-argument quoting feature as follows:
 
   $ssh->system(@cmd1, \\'&&', @cmd2, \\'&&', @cmd3, ...);
+
+=item Running detached remote processes
+
+B<Q>: I need to be able to ssh into several machines from my script,
+launch a process to run in the background there, and then return
+immediately while the remote programs keep running...
+
+B<A>: If the remote systems run some Unix/Linux variant, the right
+approach is to use L<nohup(1)> that will disconnect the remote process
+from the stdio streams and to ask the shell to run the command on the
+background. For instance:
+
+  $ssh->system("nohup $long_running_command &");
+
+Also, it may be possible to demonize the remote program. If it is
+written in Perl you can use L<App::Daemon> for that (actually, there
+are several CPAN modules that provided that kind of functionality).
+
+In any case, note that you shouldn't use L</spawn> for that.
 
 =back
 
