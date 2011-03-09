@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.51_02';
+our $VERSION = '0.51_03';
 
 use strict;
 use warnings;
@@ -731,7 +731,8 @@ sub _wait_for_master {
                 if ($status eq 'waiting_for_password_prompt') {
                     if ($$bout =~ /The authenticity of host.*can't be established/si) {
                         $self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix,
-                                          "the authenticity of the target host can't be established, try loging manually first");
+                                          "the authenticity of the target host can't be established, the remote host "
+                                          . "public key is probably not present on the '~/.ssh/known_hosts' file");
                         $self->_kill_master;
                         return undef;
                     }
@@ -936,27 +937,19 @@ sub _fileno_dup_dangerous {
     undef;
 }
 
-sub _make_dpipe {
+sub _exec_dpipe {
     my ($self, $cmd, $io, $err) = @_;
-    my $pid = fork;
-    unless ($pid) {
-        eval {
-            defined $pid or die "Unable to create new process: $!";
-            my $io_fd  = _fileno_dup_dangerous(3 => $io);
-            my $err_fd = _fileno_dup_dangerous(3 => $err);
-            POSIX::dup2($io_fd, 0);
-            POSIX::dup2($io_fd, 1);
-            POSIX::dup2($err_fd, 2) if defined $err_fd;
-            if (ref $cmd) {
-                exec @$cmd;
-            }
-            else {
-                exec $cmd;
-            }
-        };
-        POSIX::_exit(255);
+    my $io_fd  = _fileno_dup_dangerous(3 => $io);
+    my $err_fd = _fileno_dup_dangerous(3 => $err);
+    POSIX::dup2($io_fd, 0);
+    POSIX::dup2($io_fd, 1);
+    POSIX::dup2($err_fd, 2) if defined $err_fd;
+    if (ref $cmd) {
+        exec @$cmd;
     }
-    return $pid;
+    else {
+        exec $cmd;
+    }
 }
 
 sub open_ex {
@@ -967,8 +960,15 @@ sub open_ex {
 
     my $tunnel = delete $opts{tunnel};
 
+    my ($stdinout_socket, $stdinout_dpipe_is_parent);
     my $stdinout_dpipe = delete $opts{stdinout_dpipe};
-    my $stdinout_socket = (defined $stdinout_dpipe ? 1 : delete $opts{stdinout_socket});
+    if ($stdinout_dpipe) {
+        $stdinout_dpipe_is_parent = delete $opts{stdinout_dpipe_is_parent};
+        $stdinout_socket = 1;
+    }
+    else {
+        $stdinout_socket = delete $opts{stdinout_socket};
+    }
 
     my ($stdin_discard, $stdin_pipe, $stdin_fh, $stdin_file, $stdin_pty,
         $stdout_discard, $stdout_pipe, $stdout_fh, $stdout_file, $stdout_pty,
@@ -1111,7 +1111,13 @@ sub open_ex {
         $stderr_discard and (open $werr, '>', '/dev/null' or POSIX::_exit(255));
 
         if ($stdinout_dpipe) {
-            $self->_make_dpipe($stdinout_dpipe, $win, $werr) or POSIX::_exit(255);
+            my $pid1 = fork;
+            defined $pid1 or POSIX::_exit(255);
+
+            unless ($pid1 xor $stdinout_dpipe_is_parent) {
+                eval { $self->_exec_dpipe($stdinout_dpipe, $win, $werr) };
+                POSIX::_exit(255);
+            }
         }
 
         my $rin_fd = _fileno_dup_dangerous(0 => $rin);
@@ -1275,7 +1281,7 @@ sub _io3 {
 
 _sub_options spawn => qw(stderr_to_stdout stdin_discard stdin_fh stdin_file stdout_discard
                          stdout_fh stdout_file stderr_discard stderr_fh stderr_file
-                         stdinout_dpipe quote_args tty ssh_opts tunnel);
+                         stdinout_dpipe stdintout_dpipe_is_parent quote_args tty ssh_opts tunnel);
 sub spawn {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1365,9 +1371,10 @@ sub open3pty {
     return ($pty, $err, $pid);
 }
 
-_sub_options system => qw(stdout_discard stdout_fh stdin_discard stdout_file stdin_fh
-                          stdin_file quote_args stderr_to_stdout stderr_discard stderr_fh
-                          stderr_file stdinout_dpipe tty ssh_opts tunnel);
+_sub_options system => qw(stdout_discard stdout_fh stdin_discard stdout_file stdin_fh stdin_file
+                          quote_args stderr_to_stdout stderr_discard stderr_fh stderr_file
+                          stdinout_dpipe stdinout_dpipe_is_parent tty ssh_opts tunnel);
+
 sub system {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1388,16 +1395,16 @@ sub system {
     $self->_waitpid($pid, $timeout);
 }
 
-_sub_options test => qw(stdout_discard stdout_fh stdin_discard stdout_file stdin_fh
-                        stdin_file quote_args stderr_to_stdout stderr_discard stderr_fh
-                        stderr_file stdinout_dpipe tty ssh_opts timeout stdin_data);
+_sub_options test => qw(stdout_discard stdout_fh stdin_discard stdout_file stdin_fh stdin_file
+                        quote_args stderr_to_stdout stderr_discard stderr_fh stderr_file
+                        stdinout_dpipe stdinout_dpipe_is_parent stdtty ssh_opts timeout stdin_data);
 
 sub test {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     $opts{stdout_discard} = 1 unless grep defined($opts{$_}), qw(stdout_discard stdout_fh
-                                                                 stdout_file);
+                                                                 stdout_file stdinout_dpipe);
     $opts{stderr_discard} = 1 unless grep defined($opts{$_}), qw(stderr_discard stderr_fh
                                                                  stderr_file stderr_to_stdout);
     _croak_bad_options %opts;
@@ -3131,15 +3138,50 @@ Common problems are:
 
 =item *
 
-Not having the remote host public key in the known_hosts file.
+Remote host public key not present in known_hosts file.
+
+The SSH protocol uses public keys to ensure the identity of the remote
+host, so that it can not be supplanted by some malicius third
+party.
+
+For OpenSSH, usually the server public key is stored in
+C</etc/ssh/ssh_host_dsa_key.pub> or in
+C</etc/ssh/ssh_host_rsa_key.pub> and that key should be copied into the
+C<~/.ssh/known_hosts> file in the local machine (other SSH
+implementations may use other file locations).
+
+Maintaining the server keys when several hosts and clients are
+involved may be somewhat inconvenient, so most SSH clients, by
+default, when a new connection is stablished to a host whose key is
+not in the C<known_hosts> file, show the key and ask the user if he
+wants the key copied there.
+
+=item *
+
+Wrong remote host public key in known_hosts file.
+
+This is another common problem that happens when some server is
+replaced or reinstalled from scratch and its public key changes
+becomming different to that installed on the C<known_hosts> file.
+
+The easiest way to solve that problem is to remove the old key from
+the C<known_hosts> file by hand using any editor and then connecting
+to the server and replying C<yes> when asked to save the new key.
 
 =item *
 
 Wrong permissions for the C<~/.ssh> directory or its contents.
 
+OpenSSH client performs several checks on the access permissions of
+the C<~/.ssh> directory and its contents and refuses to use them when
+misconfigured. See the FILES section from the L<ssh(1)> man page.
+
 =item *
 
-Incorrect settings for public key authentication.
+Incorrect settings for password or public key authentication.
+
+Check that you are using the right password or that the user public
+key is correctly installed on the server.
 
 =back
 
@@ -3345,7 +3387,9 @@ In any case, note that you shouldn't use L</spawn> for that.
 
 OpenSSH client documentation L<ssh(1)>, L<ssh_config(5)>, the project
 web L<http://www.openssh.org> and its FAQ
-L<http://www.openbsd.org/openssh/faq.html>. L<scp(1)> and L<rsync(1)>.
+L<http://www.openbsd.org/openssh/faq.html>. L<scp(1)> and
+L<rsync(1)>. The OpenSSH Wikibook
+L<http://en.wikibooks.org/wiki/OpenSSH>.
 
 Core perl documentation L<perlipc>, L<perlfunc/open>,
 L<perlfunc/waitpid>.
@@ -3357,8 +3401,8 @@ L<Net::SFTP::Foreign|Net::SFTP::Foreign> provides a compatible SFTP
 implementation.
 
 L<Expect|Expect> can be used to interact with commands run through
-this module on the remote machine (see also the C<expect.pl> script in
-the sample directory).
+this module on the remote machine (see also the C<expect.pl> and
+<autosudo.pl> scripts in the sample directory).
 
 L<SSH::OpenSSH::Parallel> is an advanced scheduler that allows to run
 commands in remote hosts in parallel. It is obviously based on
