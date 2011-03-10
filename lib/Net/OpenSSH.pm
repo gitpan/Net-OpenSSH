@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.51_03';
+our $VERSION = '0.51_04';
 
 use strict;
 use warnings;
@@ -74,7 +74,7 @@ sub _catch_tainted_args {
     my $i;
     for (@_) {
         next unless $i++;
-        if (Scalar::Util::tainted $_) {
+        if (Scalar::Util::tainted($_)) {
             my (undef, undef, undef, $subn) = caller 1;
             my $msg = ( $subn =~ /::([a-z]\w*)$/
                         ? "Insecure argument '$_' on '$1' method call"
@@ -82,7 +82,7 @@ sub _catch_tainted_args {
             _tcroak($msg);
         }
         elsif (ref($_) eq 'HASH') {
-            for (grep Scalar::Util::tainted $_, values %$_) {
+            for (grep Scalar::Util::tainted($_), values %$_) {
 		my (undef, undef, undef, $subn) = caller 1;
 		my $msg = ( $subn =~ /::([a-z]\w*)$/
 			    ? "Insecure argument on '$1' method call"
@@ -3140,9 +3140,8 @@ Common problems are:
 
 Remote host public key not present in known_hosts file.
 
-The SSH protocol uses public keys to ensure the identity of the remote
-host, so that it can not be supplanted by some malicius third
-party.
+The SSH protocol uses public keys to identify the remote hosts so that
+they can not be supplanted by some malicious third parties.
 
 For OpenSSH, usually the server public key is stored in
 C</etc/ssh/ssh_host_dsa_key.pub> or in
@@ -3165,8 +3164,8 @@ replaced or reinstalled from scratch and its public key changes
 becomming different to that installed on the C<known_hosts> file.
 
 The easiest way to solve that problem is to remove the old key from
-the C<known_hosts> file by hand using any editor and then connecting
-to the server and replying C<yes> when asked to save the new key.
+the C<known_hosts> file by hand using any editor and then to connect
+to the server replying C<yes> when asked to save the new key.
 
 =item *
 
