@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.51_04';
+our $VERSION = '0.51_05';
 
 use strict;
 use warnings;
@@ -168,6 +168,8 @@ sub new {
 	$host_ssh = $host;
     }
 
+    my $reuse_master = delete $opts{reuse_master};
+
     $user = delete $opts{user} unless defined $user;
     $port = delete $opts{port} unless defined $port;
     $passwd = delete $opts{passwd} unless defined $passwd;
@@ -184,21 +186,34 @@ sub new {
     my $strict_mode = delete $opts{strict_mode};
     $strict_mode = 1 unless defined $strict_mode;
     my $async = delete $opts{async};
-    my $master_opts = delete $opts{master_opts};
     my $target_os = delete $opts{target_os};
     $target_os = 'unix' unless defined $target_os;
-
     my $expand_vars = delete $opts{expand_vars};
     my $vars = delete $opts{vars} || {};
 
-    my ($master_stdout_fh, $master_stderr_fh,
+    my ($master_opts, @master_opts,
+        $master_stdout_fh, $master_stderr_fh,
 	$master_stdout_discard, $master_stderr_discard);
 
-    ($master_stdout_fh = delete $opts{master_stdout_fh} or
-     $master_stdout_discard = delete $opts{master_stdout_discard});
+    unless ($reuse_master) {
+        ($master_stdout_fh = delete $opts{master_stdout_fh} or
+         $master_stdout_discard = delete $opts{master_stdout_discard});
 
-    ($master_stderr_fh = delete $opts{master_stderr_fh} or
-     $master_stderr_discard = delete $opts{master_stderr_discard});
+        ($master_stderr_fh = delete $opts{master_stderr_fh} or
+         $master_stderr_discard = delete $opts{master_stderr_discard});
+
+        $master_opts = delete $opts{master_opts};
+        if (defined $master_opts) {
+            if (ref($master_opts)) {
+                @master_opts = @$master_opts;
+            }
+            else {
+                carp "'master_opts' argument looks like if it should be splited first"
+                    if $master_opts =~ /^-\w\s+\S/;
+                @master_opts = $master_opts;
+            }
+        }
+    }
 
     my ($default_stdout_fh, $default_stderr_fh, $default_stdin_fh,
 	$default_stdout_file, $default_stderr_file, $default_stdin_file,
@@ -223,18 +238,6 @@ sub new {
 	unless defined $default_stdin_file;
 
     _croak_bad_options %opts;
-
-    my @master_opts;
-    if (defined $master_opts) {
-	if (ref($master_opts)) {
-	    @master_opts = @$master_opts;
-	}
-	else {
-	    carp "'master_opts' argument looks like if it should be splited first"
-		if $master_opts =~ /^-\w\s+\S/;
-	    @master_opts = $master_opts;
-	}
-    }
 
     my @ssh_opts;
     # TODO: are those options really requiered or just do they eat on
@@ -269,6 +272,7 @@ sub new {
                  _timeout => $timeout,
                  _kill_ssh_on_timeout => $kill_ssh_on_timeout,
                  _home => $home,
+                 _reuse_master => $reuse_master,
 		 _default_stdin_fh => $default_stdin_fh,
 		 _default_stdout_fh => $default_stdout_fh,
 		 _default_stderr_fh => $default_stderr_fh,
@@ -297,6 +301,8 @@ sub new {
     $ctl_dir = $self->_expand_vars($ctl_dir);
 
     unless (defined $ctl_path) {
+        $reuse_master and croak "reuse_master is set but ctl_path is not defined";
+
         $ctl_dir = File::Spec->catdir($self->{_home}, ".libnet-openssh-perl")
 	    unless defined $ctl_dir;
 
@@ -329,7 +335,12 @@ sub new {
     }
 
     $self->{_ctl_path} = $ctl_path;
-    $self->_connect($async);
+    if ($reuse_master) {
+        $self->_wait_for_master($async, 1);
+    }
+    else {
+        $self->_connect($async);
+    }
     $self;
 }
 
@@ -646,7 +657,7 @@ sub wait_for_master {
     my $self = shift;
     @_ <= 1 or croak 'Usage: $ssh->wait_for_master([$async])';
     $self->{_wfm_status} and
-	return $self->_wait_for_master(@_);
+	return $self->_wait_for_master($_[0]);
     $self->{_error} == OSSH_MASTER_FAILED and
 	return undef;
 
@@ -667,15 +678,17 @@ sub _wait_for_master {
 
     my $mpty = $self->{_mpty};
     my $passwd = $deobfuscate->($self->{_passwd});
+    my $pid = $self->{_pid};
+    # an undefined pid indicates we are reusing a master connection
 
     if ($reset) {
         $$bout = '';
-        $status = ( defined $passwd
+        $status = ( (defined $passwd and $pid)
                     ? 'waiting_for_password_prompt'
                     : 'waiting_for_socket' );
     }
 
-    my $pid = $self->{_pid};
+
     my $ctl_path = $self->{_ctl_path};
     my $fnopty = fileno $mpty if defined $mpty;
     my $dt = ($async ? 0 : 0.1);
@@ -701,7 +714,7 @@ sub _wait_for_master {
                 $error = "execution of control command failed: " . $self->error;
             }
             elsif ($check =~ /pid=(\d+)/) {
-                return 1 if $pid == $1;
+                return 1 if (!$pid or $1 == $pid);
 
                 $error = "bad ssh master at $ctl_path, socket owned by pid $1 (pid $pid expected)";
             }
@@ -716,7 +729,12 @@ sub _wait_for_master {
             $self->_kill_master;
             return undef;
         }
-        if (waitpid($pid, WNOHANG) == $pid or $! == Errno::ECHILD) {
+        if (!$pid) {
+            $self->_set_error(OSSH_MASTER_FAILED,
+                              $wfm_error_prefix, "unable to reuse master socket because it does not exist");
+            return undef;
+        }
+        elsif (waitpid($pid, WNOHANG) == $pid or $! == Errno::ECHILD) {
             $self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix,
                               "ssh master exited unexpectedly");
             return undef;
@@ -892,9 +910,9 @@ sub make_remote_command {
     $self->_check_master_and_clear_error or return ();
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $tty = delete $opts{tty};
+    my @ssh_opts = _array_or_scalar_to_list delete $opts{ssh_opts};
     my @args = $self->_quote_args(\%opts, @_);
     _croak_bad_options %opts;
-    my @ssh_opts;
     push @ssh_opts, ($tty ? '-qtt' : '-T') if defined $tty;
     my @call = $self->_make_ssh_call(\@ssh_opts, @args);
     if (wantarray) {
@@ -2057,7 +2075,8 @@ Opens the given filenames and use it as the defaults.
 
 =item master_stderr_fh => $fh
 
-Redirect corresponding stdio streams of the master SSH process to given filehandles.
+Redirect corresponding stdio streams of the master SSH process to
+given filehandles.
 
 =item master_stdout_discard => $bool
 
@@ -2074,6 +2093,16 @@ See L</"Variable expansion"> below.
 =item vars => \%vars
 
 Initial set of variables.
+
+=item reuse_master => 1
+
+Instead of launching a new OpenSSH client in master mode, the module
+tries to reuse an already existent one. C<ctl_path> must also be
+passed when this option is set. See also </get_ctl_path>.
+
+Example:
+
+  $ssh = Net::OpenSSH->new('foo', reuse_master => 1, ctl_path = $path);
 
 =back
 
@@ -3440,7 +3469,7 @@ To report bugs send an email to the address that appear below or use
 the CPAN bug tracking system at L<http://rt.cpan.org>.
 
 B<Post questions related to how to use the module in Perlmonks>
-L<http://perlmoks.org/>, you will probably get faster responses that
+L<http://perlmoks.org/>, you will probably get faster responses than
 if you address me directly and I visit Perlmonks quite often, so I
 will see your question anyway.
 
