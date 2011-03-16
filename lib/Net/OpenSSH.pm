@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.51_05';
+our $VERSION = '0.51_06';
 
 use strict;
 use warnings;
@@ -135,40 +135,47 @@ sub new {
     @_ & 1 and unshift @_, 'host';
     my %opts = @_;
 
+    my $external_master = delete $opts{external_master};
+    # reuse_master is an obsolete alias:
+    $external_master = delete $opts{reuse_master} unless defined $external_master;
+
+    my ($user, $passwd, $ipv6, $host, $port, $host_ssh);
     my $target = delete $opts{host};
+    if (defined $target) {
+        ($user, $passwd, $ipv6, $host, $port) =
+            $target =~ m{^
+                        \s*               # space
+                        (?:
+                          ([^\@:]+)       # username
+                          (?::(.*))?      # : password
+                          \@              # @
+                        )?
+                        (?:               # host
+                           (              #   IPv6...
+                             \[$IPv6_re\] #     [IPv6]
+                             |            #     or
+                             $IPv6_re     #     IPv6
+                           )
+                           |              #   or
+                           ([^\[\]\@:]+)  #   hostname / ipv4
+                        )
+                        (?::([^\@:]+))?   # port
+                        \s*               # space
+                        $}ix
+                or croak "bad host/target '$target' specification";
 
-    my ($user, $passwd, $ipv6, $host, $port) =
-        $target =~ m{^
-                    \s*               # space
-                    (?:
-                      ([^\@:]+)       # username
-                      (?::(.*))?      # : password
-                      \@              # @
-                    )?
-                    (?:               # host
-                       (              #   IPv6...
-                         \[$IPv6_re\] #     [IPv6]
-                         |            #     or
-                         $IPv6_re     #     IPv6
-                       )
-                       |              #   or
-                       ([^\[\]\@:]+)  #   hostname / ipv4
-                    )
-                    (?::([^\@:]+))?   # port
-                    \s*               # space
-                   $}ix
-            or croak "bad host/target '$target' specification";
-
-    my $host_ssh;
-    if (defined $ipv6) {
-	($host_ssh) = $ipv6 =~ /^\[?(.*?)\]?$/;
-	$host = "[$host_ssh]";
+        if (defined $ipv6) {
+            ($host_ssh) = $ipv6 =~ /^\[?(.*?)\]?$/;
+            $host = "[$host_ssh]";
+        }
+        else {
+            $host_ssh = $host;
+        }
     }
     else {
-	$host_ssh = $host;
+        $external_master or croak "mandatory host argument missing";
+        $host_ssh = 'UNKNOWN'
     }
-
-    my $reuse_master = delete $opts{reuse_master};
 
     $user = delete $opts{user} unless defined $user;
     $port = delete $opts{port} unless defined $port;
@@ -195,7 +202,7 @@ sub new {
         $master_stdout_fh, $master_stderr_fh,
 	$master_stdout_discard, $master_stderr_discard);
 
-    unless ($reuse_master) {
+    unless ($external_master) {
         ($master_stdout_fh = delete $opts{master_stdout_fh} or
          $master_stdout_discard = delete $opts{master_stdout_discard});
 
@@ -272,7 +279,7 @@ sub new {
                  _timeout => $timeout,
                  _kill_ssh_on_timeout => $kill_ssh_on_timeout,
                  _home => $home,
-                 _reuse_master => $reuse_master,
+                 _external_master => $external_master,
 		 _default_stdin_fh => $default_stdin_fh,
 		 _default_stdout_fh => $default_stdout_fh,
 		 _default_stderr_fh => $default_stderr_fh,
@@ -301,7 +308,7 @@ sub new {
     $ctl_dir = $self->_expand_vars($ctl_dir);
 
     unless (defined $ctl_path) {
-        $reuse_master and croak "reuse_master is set but ctl_path is not defined";
+        $external_master and croak "external_master is set but ctl_path is not defined";
 
         $ctl_dir = File::Spec->catdir($self->{_home}, ".libnet-openssh-perl")
 	    unless defined $ctl_dir;
@@ -335,7 +342,7 @@ sub new {
     }
 
     $self->{_ctl_path} = $ctl_path;
-    if ($reuse_master) {
+    if ($external_master) {
         $self->_wait_for_master($async, 1);
     }
     else {
@@ -1525,7 +1532,7 @@ sub _scp_get_args {
 
     @_ > 0 or croak
 	'Usage: $ssh->' . _calling_method . '(\%opts, $remote_fn1, $remote_fn2, ..., $local_fn_or_dir)';
-   
+
     my $glob = delete $opts{glob};
 
     my $target = (@_ > 1 ? pop @_ : '.');
@@ -2094,15 +2101,15 @@ See L</"Variable expansion"> below.
 
 Initial set of variables.
 
-=item reuse_master => 1
+=item external_master => 1
 
 Instead of launching a new OpenSSH client in master mode, the module
 tries to reuse an already existent one. C<ctl_path> must also be
-passed when this option is set. See also </get_ctl_path>.
+passed when this option is set. See also L</get_ctl_path>.
 
 Example:
 
-  $ssh = Net::OpenSSH->new('foo', reuse_master => 1, ctl_path = $path);
+  $ssh = Net::OpenSSH->new('foo', external_master => 1, ctl_path = $path);
 
 =back
 
@@ -2125,8 +2132,8 @@ Return the corresponding SSH login parameters.
 
 =item $ssh->get_ctl_path
 
-Returns the path to the socket where OpenSSH listens for new
-multiplexed connections.
+X<get_ctl_path>Returns the path to the socket where the OpenSSH master
+process listens for new multiplexed connections.
 
 =item ($in, $out, $err, $pid) = $ssh->open_ex(\%opts, @cmd)
 
