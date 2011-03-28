@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.51_07';
+our $VERSION = '0.51_08';
 
 use strict;
 use warnings;
@@ -97,9 +97,8 @@ sub _set_error {
     my $self = shift;
     my $code = shift || 0;
     my $err = $self->{_error} = ( $code
-                                  ? Scalar::Util::dualvar($code, (@_
-                                                                  ? join(': ', @_)
-                                                                  : "Unknown error $code"))
+                                  ? Scalar::Util::dualvar($code, join(': ', @{$self->{_error_prefix}},
+                                                                      (@_ ? @_ : "Unknown error $code")))
                                   : 0 );
     $debug and $debug & 1 and _debug "set_error($code - $err)";
     return $err
@@ -268,6 +267,7 @@ sub new {
     }
 
     my $self = { _error => 0,
+		 _error_prefix => [],
 		 _perl_pid => $$,
                  _ssh_cmd => $ssh_cmd,
 		 _scp_cmd => $scp_cmd,
@@ -321,7 +321,7 @@ sub new {
         mkdir $ctl_dir;
 	umask $old_umask;
         unless (-d $ctl_dir) {
-            $self->_set_error(OSSH_MASTER_FAILED, "unable to create ctl_dir $ctl_dir: $!");
+            $self->_set_error(OSSH_MASTER_FAILED, "unable to create ctl_dir $ctl_dir");
             return $self;
         }
 
@@ -334,7 +334,7 @@ sub new {
         if (-e $ctl_path) {
             $self->_set_error(OSSH_MASTER_FAILED,
                               "unable to find unused name for ctl_path inside ctl_dir $ctl_dir");
-            return undef;
+            return $self;
         }
     }
     $ctl_dir = File::Spec->catpath((File::Spec->splitpath($ctl_path))[0,1], "");
@@ -364,7 +364,7 @@ sub get_expand_vars { shift->{_expand_vars} }
 
 sub set_expand_vars {
     my $self = shift;
-    $self->{_expand_vars} = !!shift;
+    $self->{_expand_vars} = (shift(@_) ? 1 : 0);
 }
 
 sub set_var {
@@ -590,10 +590,7 @@ sub _connect {
 }
 
 sub _waitpid {
-    my $self = shift;
-    my $pid = shift;
-    my $timeout = shift;
-
+    my ($self, $pid, $timeout) = @_;
     $? = 0;
     if ($pid) {
         $timeout = $self->{_timeout} unless defined $timeout;
@@ -636,7 +633,7 @@ sub _waitpid {
 		    my $signal = ($? & 255);
 		    my $errstr = "child exited with code " . ($? >> 8);
 		    $errstr .= ", signal $signal" if $signal;
-		    $self->_or_set_error(OSSH_SLAVE_CMD_FAILED, @_, $errstr);
+		    $self->_or_set_error(OSSH_SLAVE_CMD_FAILED, $errstr);
 		    return undef;
 		}
 		return 1;
@@ -647,8 +644,7 @@ sub _waitpid {
 	    }
 	    next if $! == Errno::EINTR();
 	    if ($! == Errno::ECHILD) {
-		$self->_or_set_error(OSSH_SLAVE_FAILED,
-				     @_, "child process $pid does not exist", $!);
+		$self->_or_set_error(OSSH_SLAVE_FAILED, "child process $pid does not exist", $!);
 		return undef
 	    }
 	    warn "Internal error: unexpected error (".($!+0).": $!) from waitpid($pid) = $r. Report it, please!";
@@ -658,8 +654,7 @@ sub _waitpid {
 	}
     }
     else {
-	$self->_or_set_error(OSSH_SLAVE_FAILED, @_,
-			     "spawning of new process failed");
+	$self->_or_set_error(OSSH_SLAVE_FAILED, "spawning of new process failed");
 	return undef;
     }
 }
@@ -679,13 +674,11 @@ sub wait_for_master {
     1;
 }
 
-my $wfm_error_prefix = "unable to establish master SSH connection";
-
 sub _wait_for_master {
     my ($self, $async, $reset) = @_;
 
     my $status = delete $self->{_wfm_status};
-    my $bout = \($self->{_wfm_bout});
+    my $bout = \ ($self->{_wfm_bout});
 
     my $mpty = $self->{_mpty};
     my $passwd = $deobfuscate->($self->{_passwd});
@@ -699,7 +692,6 @@ sub _wait_for_master {
                     : 'waiting_for_socket' );
     }
 
-
     my $ctl_path = $self->{_ctl_path};
     my $fnopty = fileno $mpty if defined $mpty;
     my $dt = ($async ? 0 : 0.1);
@@ -709,45 +701,43 @@ sub _wait_for_master {
     my $rv = '';
     vec($rv, $fnopty, 1) = 1 if $status eq 'waiting_for_password_prompt';
 
+    local $self->{_error_prefix} = [@{$self->{_error_prefix}},
+				    "unable to establish master SSH connection"];
     while (1) {
         last if (defined $timeout and (time - $start_time) > $timeout);
 
         if (-e $ctl_path) {
             unless (-S $ctl_path) {
-                $self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix,
+                $self->_set_error(OSSH_MASTER_FAILED,
                                   "bad ssh master at $ctl_path, object is not a socket");
                 $self->_kill_master;
                 return undef;
             }
             my $check = $self->_master_ctl('check');
-            my $error;
-            if (not defined $check) {
-                $error = "execution of control command failed: " . $self->error;
+            if (defined $check) {
+                my $error;
+		if ($check =~ /pid=(\d+)/) {
+		    return 1 if (!$pid or $1 == $pid);
+		    $error = "bad ssh master at $ctl_path, socket owned by pid $1 (pid $pid expected)";
+		}
+		elsif ($check =~ /illegal option/i) {
+		    $error = "OpenSSH 4.1 or later required";
+		}
+		else {
+		    $error = "Unknown error";
+		}
+                $self->_or_set_error(OSSH_MASTER_FAILED, $error);
             }
-            elsif ($check =~ /pid=(\d+)/) {
-                return 1 if (!$pid or $1 == $pid);
-
-                $error = "bad ssh master at $ctl_path, socket owned by pid $1 (pid $pid expected)";
-            }
-	    elsif ($check =~ /illegal option/i) {
-                $error = "OpenSSH 4.1 or later required";
-	    }
-	    else {
-                $error = "Unknown error";
-	    }
-
-            $self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix, $error);
-            $self->_kill_master;
+	    $self->_kill_master;
             return undef;
         }
         if (!$pid) {
             $self->_set_error(OSSH_MASTER_FAILED,
-                              $wfm_error_prefix, "unable to reuse master socket because it does not exist");
+                              "socket does not exist");
             return undef;
         }
         elsif (waitpid($pid, WNOHANG) == $pid or $! == Errno::ECHILD) {
-            $self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix,
-                              "ssh master exited unexpectedly");
+            $self->_set_error(OSSH_MASTER_FAILED, "master process exited unexpectedly");
             return undef;
         }
         my $rv1 = $rv;
@@ -759,7 +749,7 @@ sub _wait_for_master {
             if ($read) {
                 if ($status eq 'waiting_for_password_prompt') {
                     if ($$bout =~ /The authenticity of host.*can't be established/si) {
-                        $self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix,
+                        $self->_set_error(OSSH_MASTER_FAILED,
                                           "the authenticity of the target host can't be established, the remote host "
                                           . "public key is probably not present on the '~/.ssh/known_hosts' file");
                         $self->_kill_master;
@@ -781,33 +771,33 @@ sub _wait_for_master {
             return 0;
         }
     }
-    $self->_set_error(OSSH_MASTER_FAILED, $wfm_error_prefix, "ssh master login timed out");
+    $self->_set_error(OSSH_MASTER_FAILED, "login timeout");
     $self->_kill_master;
-    undef
+    undef;
 }
 
 sub _master_ctl {
     my ($self, $cmd) = @_;
-    # don't let the encoding stuff go in the way
-    local $self->{_default_stream_encoding};
-    local $self->{_default_argument_encoding};
-    $self->capture({ stdin_discard => 1, tty => 0,
+    local $self->{_error_prefix} = [@{$self->{_error_prefix}},
+                                    "control command failed"];
+    $self->capture({ encoding => 'bytes', # don't let the encoding
+					  # stuff go in the way
+		     stdin_discard => 1, tty => 0,
                      stderr_to_stdout => 1, ssh_opts => [-O => $cmd]});
 }
 
 sub _make_pipe {
     my $self = shift;
     my ($r, $w);
-    unless (pipe ($r, $w)) {
-        $self->_set_error(OSSH_SLAVE_PIPE_FAILED,
-                          @_, "unable to create pipe: $!");
-        return;
+    if (pipe $r, $w) {
+        my $old = select;
+        select $r; $ |= 1;
+        select $w; $ |= 1;
+        select $old;
+        return ($r, $w);
     }
-    my $old = select;
-    select $r; $ |= 1;
-    select $w; $ |= 1;
-    select $old;
-    return ($r, $w);
+    $self->_set_error(OSSH_SLAVE_PIPE_FAILED, "unable to create pipe: $!");
+    return;
 }
 
 my %loaded_module;
@@ -942,7 +932,7 @@ sub make_remote_command {
 }
 
 sub _open_file {
-    my ($self, $default_mode, $name_or_args, @error_prefix) = @_;
+    my ($self, $default_mode, $name_or_args) = @_;
     my ($mode, @args) = (ref $name_or_args
 			 ? @$name_or_args
 			 : ($default_mode, $name_or_args));
@@ -951,7 +941,7 @@ sub _open_file {
 	return $fh;
     }
     else {
-	$self->_set_error(OSSH_SLAVE_PIPE_FAILED, @error_prefix,
+	$self->_set_error(OSSH_SLAVE_PIPE_FAILED,
 			  "Unable to open file '$args[0]': $!");
 	return undef;
     }
@@ -992,10 +982,17 @@ sub _delete_stream_encoding {
                    $self->{_default_stream_encoding});
 }
 
+sub _delete_argument_encoding {
+    my ($self, $opts) = @_;
+    _first_defined(delete $opts->{argument_encoding},
+                   delete $opts->{encoding},
+                   $self->{_default_argument_encoding});
+}
+
 sub open_ex {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
-    $self->_check_master_and_clear_error or return ();
+    $self->_check_master_and_clear_error or return;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $tunnel = delete $opts{tunnel};
     my ($stdinout_socket, $stdinout_dpipe_is_parent);
@@ -1034,11 +1031,7 @@ sub open_ex {
       $stderr_to_stdout = delete $opts{stderr_to_stdout} or
       $stderr_file = delete $opts{stderr_file} );
 
-    my $argument_encoding = _first_defined(delete $opts{argument_encoding},
-                                           delete $opts{encoding},
-                                           $self->{_default_argument_encoding});
-
-    my @error_prefix = _array_or_scalar_to_list delete $opts{_error_prefix};
+    my $argument_encoding = $self->_delete_argument_encoding(\%opts);
 
     my @ssh_opts = $self->_expand_vars(_array_or_scalar_to_list delete $opts{ssh_opts});
 
@@ -1066,34 +1059,34 @@ sub open_ex {
     _croak_bad_options %opts;
 
     if (defined $stdin_file) {
-	$stdin_fh = $self->_open_file('<', $stdin_file, @error_prefix) or return
+	$stdin_fh = $self->_open_file('<', $stdin_file) or return
     }
     if (defined $stdout_file) {
-	$stdout_fh = $self->_open_file('>', $stdout_file, @error_prefix) or return
+	$stdout_fh = $self->_open_file('>', $stdout_file) or return
     }
     if (defined $stderr_file) {
-	$stderr_fh = $self->_open_file('>', $stderr_file, @error_prefix) or return
+	$stderr_fh = $self->_open_file('>', $stderr_file) or return
     }
 
     my ($rin, $win, $rout, $wout, $rerr, $werr);
 
     if ($stdinout_socket) {
-        unless(socketpair($rin, $win, AF_UNIX, SOCK_STREAM, PF_UNSPEC)) {
-            $self->_set_error(OSSH_SLAVE_PIPE_FAILED, @error_prefix, "socketpair failed: $!");
-            return ();
+        unless(socketpair $rin, $win, AF_UNIX, SOCK_STREAM, PF_UNSPEC) {
+            $self->_set_error(OSSH_SLAVE_PIPE_FAILED, "socketpair failed: $!");
+            return;
         }
         $wout = $rin;
     }
     else {
         if ($stdin_pipe) {
-            ($rin, $win) = $self->_make_pipe(@error_prefix) or return;
+            ($rin, $win) = $self->_make_pipe or return;
         }
         elsif ($stdin_pty) {
             _load_module('IO::Pty');
             $win = IO::Pty->new;
             unless ($win) {
-                $self->_set_error(OSSH_SLAVE_PIPE_FAILED, @error_prefix, "unable to allocate pseudo-tty: $!");
-                return ();
+                $self->_set_error(OSSH_SLAVE_PIPE_FAILED, "unable to allocate pseudo-tty: $!");
+                return;
             }
             $rin = $win->slave;
         }
@@ -1106,7 +1099,7 @@ sub open_ex {
         _check_is_system_fh STDIN => $rin;
 
         if ($stdout_pipe) {
-            ($rout, $wout) = $self->_make_pipe(@error_prefix) or return;
+            ($rout, $wout) = $self->_make_pipe or return;
         }
         elsif ($stdout_pty) {
             $wout = $rin;
@@ -1122,7 +1115,7 @@ sub open_ex {
 
     unless ($stderr_to_stdout) {
 	if ($stderr_pipe) {
-	    ($rerr, $werr) = $self->_make_pipe(@error_prefix) or return ();
+	    ($rerr, $werr) = $self->_make_pipe or return;
 	}
 	elsif (defined $stderr_fh) {
 	    $werr = $stderr_fh;
@@ -1144,9 +1137,9 @@ sub open_ex {
     my $pid = fork;
     unless ($pid) {
         unless (defined $pid) {
-            $self->_set_error(OSSH_SLAVE_FAILED,  @error_prefix,
+            $self->_set_error(OSSH_SLAVE_FAILED,
                               "unable to fork new ssh slave: $!");
-            return ();
+            return;
         }
 
         $stdin_discard  and (open $rin,  '<', '/dev/null' or POSIX::_exit(255));
@@ -1191,15 +1184,21 @@ sub open_ex {
 sub pipe_in {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
-    $self->_check_master_and_clear_error or return ();
+    $self->_check_master_and_clear_error or return;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
+    my $argument_encoding = $self->_delete_argument_encoding(\%opts);
     my @args = $self->_quote_args(\%opts, @_);
+    $self->_encode_args($argument_encoding, @args);
     _croak_bad_options %opts;
 
     my @call = $self->_make_ssh_call([], @args);
     $debug and $debug & 16 and _debug_dump pipe_in => @call;
-    my $pid = open my $rin, '|-', @call
-        or return ();
+    my $pid = open my $rin, '|-', @call;
+    unless ($pid) {
+        $self->_set_error(OSSH_SLAVE_FAILED,
+                          "unable to fork new ssh slave: $!");
+        return;
+    }
     return wantarray ? ($rin, $pid) : $rin;
 }
 
@@ -1208,19 +1207,26 @@ sub pipe_out {
     my $self = shift;
     $self->_check_master_and_clear_error or return ();
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
+    my $argument_encoding = $self->_delete_argument_encoding(\%opts);
     my @args = $self->_quote_args(\%opts, @_);
+    $self->_encode_args($argument_encoding, @args);
     _croak_bad_options %opts;
 
     my @call = $self->_make_ssh_call([], @args);
     $debug and $debug & 16 and _debug_dump pipe_out => @call;
-    my $pid = open my $rout, '-|', @call or return;
+    my $pid = open my $rout, '-|', @call;
+    unless ($pid) {
+        $self->_set_error(OSSH_SLAVE_FAILED,
+                          "unable to fork new ssh slave: $!");
+        return;
+    }
     return wantarray ? ($rout, $pid) : $rout;
 }
 
 sub _find_encoding {
     my ($self, $encoding, $data) = @_;
-    require Encode;
     if (defined $encoding and $encoding ne 'bytes') {
+	_load_module('Encode');
         my $enc = Encode::find_encoding($encoding);
         unless (defined $enc) {
             $self->_set_error(OSSH_ENCODING_ERROR, "bad encoding '$encoding'");
@@ -1270,7 +1276,7 @@ sub _decode {
             }
         };
         if ($@) {
-            $self->_set_error(OSSH_ENCODING_ERROR, @_, "bad output decoding");
+            $self->_set_error(OSSH_ENCODING_ERROR, "bad output decoding");
             return;
         }
     }
@@ -1716,15 +1722,16 @@ sub _scp {
     push @opts, '-p' if $copy_attrs;
     push @opts, '-l', $bwlimit if defined $bwlimit;
 
+    local $self->{_error_prefix} = [@{$self->{_error_prefix}}, 'scp failed'];
+
     my $pid = $self->open_ex({ %opts,
                                _cmd => 'scp',
-			       _error_prefix => 'unable to spawn scp process',
 			       ssh_opts => \@opts,
 			       quote_args => 0 },
 			     @_);
 
     return $pid if $async;
-    $self->_waitpid($pid, $timeout, "scp operation failed");
+    $self->_waitpid($pid, $timeout);
 }
 
 my %rsync_opt_with_arg = map { $_ => 1 } qw(chmod suffix backup-dir rsync-path max-delete max-size min-size partial-dir
@@ -1781,7 +1788,6 @@ sub _rsync {
     push @opts, '-' . ($verbose =~ /^\d+$/ ? 'v' x $verbose : 'v') if $verbose;
 
     my %opts_open_ex = ( _cmd => 'rsync',
-			 _error_prefix => 'rsync command failed',
 			 quote_args => 0 );
 
     for my $opt (keys %opts) {
@@ -1805,10 +1811,11 @@ sub _rsync {
 	}
     }
 
+    local $self->{_error_prefix} = [@{$self->{_error_prefix}}, 'rsync failed'];
+
     my $pid = $self->open_ex(\%opts_open_ex, @opts, '--', @_);
     return $pid if $async;
-
-    $self->_waitpid($pid, $timeout, "rsync operation failed") and return 1;
+    $self->_waitpid($pid, $timeout) and return 1;
 
     if ($self->error == OSSH_SLAVE_CMD_FAILED and $?) {
 	my $err = ($? >> 8);
@@ -1817,12 +1824,12 @@ sub _rsync {
 	my $signal = $? & 255;
 	my $signalstr = ($signal ? " (signal $signal)" : '');
 	$self->_set_error(OSSH_SLAVE_CMD_FAILED,
-			  "rsync exited with error code $err$signalstr: $errstr");
+			  "command exited with code $err$signalstr: $errstr");
     }
     return undef
 }
 
-_sub_options sftp => qw(autoflush timeout fs_encoding argument_encoding encoding block_size
+_sub_options sftp => qw(autoflush timeout argument_encoding encoding block_size
 			queue_size late_set_perm);
 
 sub sftp {
@@ -1836,6 +1843,7 @@ sub sftp {
                                      $opts{argument_encoding},
                                      $opts{encoding},
                                      $self->{_default_argument_encoding});
+    undef $fs_encoding if (defined $fs_encoding and $fs_encoding == 'bytes');
     _croak_bad_options %opts;
     $opts{timeout} = $self->{_timeout} unless defined $opts{timeout};
     $self->_check_master_and_clear_error or return undef;
@@ -3475,6 +3483,13 @@ man-in-the-middle attacks, etc.
 
 I advice you to do not use that option unless you fully understand its
 implications from a security point of view.
+
+If you want to use it anyway, past it to the constructor:
+
+  $ssh = Net::OpenSSH->new($host,
+           master_opts => [-o => "StrictHostKeyChecking=no"],
+           ...);
+
 
 =item child process 14947 does not exist: No child processes
 
