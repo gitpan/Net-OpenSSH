@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.51_08';
+our $VERSION = '0.51_09';
 
 use strict;
 use warnings;
@@ -109,13 +109,6 @@ sub _or_set_error {
     $self->{_error} or $self->_set_error(@_);
 }
 
-sub _check_master_and_clear_error {
-    my $self = shift;
-    $self->wait_for_master or return undef;
-    $self->{_error} = 0;
-    1;
-}
-
 sub _first_defined { defined && return $_ for @_; return }
 
 my $obfuscate = sub {
@@ -140,7 +133,7 @@ sub new {
     # reuse_master is an obsolete alias:
     $external_master = delete $opts{reuse_master} unless defined $external_master;
 
-    my ($user, $passwd, $ipv6, $host, $port, $host_ssh);
+    my ($user, $passwd, $ipv6, $host, $port, $host_ssh, $passphrase, $key_path);
     my $target = delete $opts{host};
     if (defined $target) {
         ($user, $passwd, $ipv6, $host, $port) =
@@ -182,6 +175,11 @@ sub new {
     $port = delete $opts{port} unless defined $port;
     $passwd = delete $opts{passwd} unless defined $passwd;
     $passwd = delete $opts{password} unless defined $passwd;
+    unless (defined $passwd) {
+        $passwd = delete $opts{passphrase};
+        $passphrase = 1 if defined $passwd;
+        $key_path = delete $opts{key_path};
+    }
     my $ctl_path = delete $opts{ctl_path};
     my $ctl_dir = delete $opts{ctl_dir};
     my $ssh_cmd = _first_defined delete $opts{ssh_cmd}, 'ssh';
@@ -278,6 +276,8 @@ sub new {
                  _user => $user,
                  _port => $port,
                  _passwd => $obfuscate->($passwd),
+                 _passphrase => $passphrase,
+                 _key_path => $key_path,
                  _timeout => $timeout,
                  _kill_ssh_on_timeout => $kill_ssh_on_timeout,
                  _home => $home,
@@ -551,13 +551,23 @@ sub _connect {
                        -o => "ServerAliveInterval=$timeout",
                        '-xMN');
 
+    my $pref_auths;
     my $mpty;
     if (defined $self->{_passwd}) {
         _load_module('IO::Pty');
         $self->{_mpty} = $mpty = IO::Pty->new;
-	push @master_opts, (-o => 'NumberOfPasswordPrompts=1',
-			    -o => 'PreferredAuthentications=keyboard-interactive,password');
+        $pref_auths = ($self->{_passphrase}
+                       ? 'publickey'
+                       : 'keyboard-interactive,password');
+        push @master_opts, -o => 'NumberOfPasswordPrompts=1';
     }
+    if (defined $self->{_key_path}) {
+        $pref_auths = 'publickey';
+        push @master_opts, -i => $self->{_key_path};
+    }
+
+    push @master_opts, -o => "PreferredAuthentications=$pref_auths"
+        if defined $pref_auths;
 
     my @call = $self->_make_ssh_call(\@master_opts);
 
@@ -573,7 +583,7 @@ sub _connect {
 	$self->_master_redirect('STDOUT');
 	$self->_master_redirect('STDERR');
 
-	if (defined $self->{passwd}) {
+	if (defined $self->{_passwd}) {
 	    delete $ENV{SSH_ASKPASS};
 	    delete $ENV{SSH_AUTH_SOCK};
 	}
@@ -662,6 +672,7 @@ sub _waitpid {
 sub wait_for_master {
     my $self = shift;
     @_ <= 1 or croak 'Usage: $ssh->wait_for_master([$async])';
+    $self->{error} = 0;
     $self->{_wfm_status} and
 	return $self->_wait_for_master($_[0]);
     $self->{_error} == OSSH_MASTER_FAILED and
@@ -674,10 +685,17 @@ sub wait_for_master {
     1;
 }
 
+sub check_master {
+    my $self = shift;
+    @_ and croak 'Usage: $ssh->check_master()';
+    $self->{_error} = 0;
+    $self->_wait_for_master;
+}
+
 sub _wait_for_master {
     my ($self, $async, $reset) = @_;
 
-    my $status = delete $self->{_wfm_status};
+    my $status = delete $self->{_wfm_status} || 'waiting_for_mux_socket';
     my $bout = \ ($self->{_wfm_bout});
 
     my $mpty = $self->{_mpty};
@@ -737,7 +755,10 @@ sub _wait_for_master {
             return undef;
         }
         elsif (waitpid($pid, WNOHANG) == $pid or $! == Errno::ECHILD) {
-            $self->_set_error(OSSH_MASTER_FAILED, "master process exited unexpectedly");
+            my $error = "master process exited unexpectedly";
+            $error =  "bad pass" . ($self->{_passphrase} ? 'phrase' : 'word') . " or $error"
+                if defined $self->{_passwd};
+            $self->_set_error(OSSH_MASTER_FAILED, $error);
             return undef;
         }
         my $rv1 = $rv;
@@ -756,9 +777,9 @@ sub _wait_for_master {
                         return undef;
                     }
                     if ($$bout =~ s/^(.*:)//s) {
-                        $debug and $debug & 4 and _debug "passwd requested ($1)";
+                        $debug and $debug & 4 and _debug "passwd/passphrase requested ($1)";
                         print $mpty "$passwd\n";
-                        $status = 'password_sent';
+                        $status = 'waiting_for_mux_socket';
                     }
                 }
                 else { $$bout = '' }
@@ -912,7 +933,7 @@ sub _array_or_scalar_to_list { map { defined($_) ? (ref $_ eq 'ARRAY' ? @$_ : $_
 
 sub make_remote_command {
     my $self = shift;
-    $self->_check_master_and_clear_error or return ();
+    $self->wait_for_master or return;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $tty = delete $opts{tty};
     my @ssh_opts = _array_or_scalar_to_list delete $opts{ssh_opts};
@@ -947,13 +968,15 @@ sub _open_file {
     }
 }
 
-sub _fileno_dup_dangerous {
+sub _fileno_dup_over {
     my ($good_fn, $fh) = @_;
     if (defined $fh) {
+        my @keep_open;
         my $fn = fileno $fh;
         for (1..5) {
             $fn >= $good_fn and return $fn;
             $fn = POSIX::dup($fn);
+            push @keep_open, $fn;
         }
         POSIX::_exit(255);
     }
@@ -962,8 +985,8 @@ sub _fileno_dup_dangerous {
 
 sub _exec_dpipe {
     my ($self, $cmd, $io, $err) = @_;
-    my $io_fd  = _fileno_dup_dangerous(3 => $io);
-    my $err_fd = _fileno_dup_dangerous(3 => $err);
+    my $io_fd  = _fileno_dup_over(3 => $io);
+    my $err_fd = _fileno_dup_over(3 => $err);
     POSIX::dup2($io_fd, 0);
     POSIX::dup2($io_fd, 1);
     POSIX::dup2($err_fd, 2) if defined $err_fd;
@@ -992,7 +1015,7 @@ sub _delete_argument_encoding {
 sub open_ex {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
-    $self->_check_master_and_clear_error or return;
+    $self->wait_for_master or return;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $tunnel = delete $opts{tunnel};
     my ($stdinout_socket, $stdinout_dpipe_is_parent);
@@ -1156,9 +1179,9 @@ sub open_ex {
             }
         }
 
-        my $rin_fd = _fileno_dup_dangerous(0 => $rin);
-        my $wout_fd = _fileno_dup_dangerous(1 => $wout);
-        my $werr_fd = _fileno_dup_dangerous(2 => $werr);
+        my $rin_fd  = _fileno_dup_over(0 => $rin);
+        my $wout_fd = _fileno_dup_over(1 => $wout);
+        my $werr_fd = _fileno_dup_over(2 => $werr);
 
         if (defined $rin_fd) {
             $win->make_slave_controlling_terminal if $stdin_pty;
@@ -1184,7 +1207,7 @@ sub open_ex {
 sub pipe_in {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
-    $self->_check_master_and_clear_error or return;
+    $self->wait_for_master or return;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $argument_encoding = $self->_delete_argument_encoding(\%opts);
     my @args = $self->_quote_args(\%opts, @_);
@@ -1205,7 +1228,7 @@ sub pipe_in {
 sub pipe_out {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
-    $self->_check_master_and_clear_error or return ();
+    $self->wait_for_master or return;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my $argument_encoding = $self->_delete_argument_encoding(\%opts);
     my @args = $self->_quote_args(\%opts, @_);
@@ -1285,7 +1308,7 @@ sub _decode {
 
 sub _io3 {
     my ($self, $out, $err, $in, $stdin_data, $timeout, $encoding) = @_;
-    $self->_check_master_and_clear_error or return ();
+    $self->wait_for_master or return;
     my @data = _array_or_scalar_to_list $stdin_data;
     my ($cout, $cerr, $cin) = (defined($out), defined($err), defined($in));
     $timeout = $self->{_timeout} unless defined $timeout;
@@ -1846,7 +1869,7 @@ sub sftp {
     undef $fs_encoding if (defined $fs_encoding and $fs_encoding == 'bytes');
     _croak_bad_options %opts;
     $opts{timeout} = $self->{_timeout} unless defined $opts{timeout};
-    $self->_check_master_and_clear_error or return undef;
+    $self->wait_for_master or return undef;
     my ($in, $out, $pid) = $self->open2( { ssh_opts => '-s',
 					   stderr_fh => $stderr_fh,
 					   stderr_discard => $stderr_discard,
@@ -2076,11 +2099,19 @@ TCP port number where the server is running
 
 =item password => $passwd
 
-User password for logins on the remote side
+User given password for authentication.
 
 Note that using password authentication in automated scripts is a very
 bad idea. When possible, you should use public key authentication
 instead.
+
+=item passphrase => $passphrase
+
+Use given passphrase to open private key.
+
+=item key_path => $private_key_path
+
+Use the key stored on the given file path for authentication.
 
 =item ctl_dir => $path
 
@@ -2882,6 +2913,11 @@ established. False is returned if the connection process fails or if
 it has not yet completed (then, the L</error> method can be used to
 distinguish between both cases).
 
+=item $ssh->check_master
+
+This method runs several checks to ensure that the master connection
+is still alive.
+
 =item $ssh->shell_quote(@args)
 
 Returns the list of arguments quoted so that they will be restored to
@@ -3181,17 +3217,17 @@ and methods supporting the C<stdin_data> option). Data accessed through
 pipes, sockets or redirections is not affected by the encoding options.
 
 It is also possible to set the encoding of the command and arguments
-passed to the remote server.
+passed to the remote server on the command line.
 
 By default, if no encoding option is given on the constructor or on the
 method calls, Net::OpenSSH will not perform any encoding transformation,
 effectively processing the data as latin1.
 
-When some data can not be converted between the Perl internal
-representation and the selected encoding the affected method will fail
-with a C<OSSH_ENCODING_ERROR>.
+When data can not be converted between the Perl internal
+representation and the selected encoding inside some Net::OpenSSH
+method, it will fail with an C<OSSH_ENCODING_ERROR> error.
 
-The encoding options are as follows:
+The supported encoding options are as follows:
 
 =over 4
 
@@ -3540,8 +3576,9 @@ as follows:
   $ssh = Net::OpenSSH->new($host,
                            ssh_cmd => '/usr/local/bin/ssh');
 
-AIX and probably some other unixen, also bundle SSH clients lacking the
-multiplexing functionality and require installation of OpenSSH.
+AIX and probably some other unixen, also bundle SSH clients lacking
+the multiplexing functionality and require installation of the real
+OpenSSH.
 
 =item Can't change working directory
 
@@ -3634,14 +3671,13 @@ C<Net::OpenSSH> to handle the connections.
 
 =head1 BUGS AND SUPPORT
 
-Support for tunnel forwarding is experimental and requires OpenSSH 5.4
-or later.
-
 Support for data encoding is highly experimental.
 
-Support for taint mode is still experimental.
+Support for passphrase handling is experimental.
 
-Tested on Linux, OpenBSD and NetBSD with OpenSSH 5.1 to 5.5.
+Support for taint mode is experimental.
+
+Tested on Linux, OpenBSD, NetBSD and Solaris with OpenSSH 5.1 to 5.8.
 
 Net::OpenSSH does not work on Windows. OpenSSH multiplexing feature
 requires passing file handles through sockets something that is not
@@ -3681,8 +3717,6 @@ upon: L<http://www.openssh.org/donations.html>.
 - *** add tests for scp, rsync and sftp methods
 
 - *** add support for more target OSs (quoting, OpenVMS, Windows & others)
-
-- passphrase handling
 
 - better timeout handling in system and capture methods
 

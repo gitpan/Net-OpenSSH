@@ -1,5 +1,15 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.51_09  Mar 29, 2011
+        - add support for passphrase protected keys
+        - add support for passing the private key path as an explicit
+          constructor option
+        - bug solved on password handling
+        - bug solved in _fileno_dup_over
+        - remove redundant _check_master_and_clear_error
+        - more tests
+        - some doc improvements
+
 0.51_08  Mar 28, 2011
         - pipe_in and pipe_out were not correctly setting error status
           on failure
