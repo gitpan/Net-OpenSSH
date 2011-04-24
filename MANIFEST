@@ -15,4 +15,5 @@ t/known_hosts
 sample/expect.pl
 sample/change_passwd.pl
 sample/autosudo.pl
+sample/net-telnet.pl
 META.yml                                 Module meta-data (added by MakeMaker)

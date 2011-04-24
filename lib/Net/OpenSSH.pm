@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.51_10';
+our $VERSION = '0.51_11';
 
 use strict;
 use warnings;
@@ -363,6 +363,7 @@ sub new {
     }
 
     $self->{_ctl_path} = $ctl_path;
+
     if ($external_master) {
         $self->_wait_for_master($async, 1);
     }
@@ -512,7 +513,7 @@ sub _kill_master {
     my $self = shift;
     my $pid = delete $self->{_pid};
     $debug and $debug & 32 and _debug '_kill_master: ', $pid;
-    if ($pid) {
+    if ($pid and $self->{_perl_pid} == $$) {
 	local $SIG{CHLD} = sub {};
         for my $sig (0, 0, 'TERM', 'TERM', 'TERM', 'KILL', 'KILL') {
             if ($sig) {
@@ -762,6 +763,11 @@ sub _wait_for_master {
                 $self->_or_set_error(OSSH_MASTER_FAILED, $error);
             }
 	    $self->_kill_master;
+            return undef;
+        }
+        if ($self->{_perl_pid} != $$) {
+            $self->_set_error(OSSH_MASTER_FAILED,
+                              "process was forked before SSH connection had been established");
             return undef;
         }
         if (!$pid) {
@@ -1887,19 +1893,19 @@ sub sftp {
                                      $opts{argument_encoding},
                                      $opts{encoding},
                                      $self->{_default_argument_encoding});
-    undef $fs_encoding if (defined $fs_encoding and $fs_encoding == 'bytes');
+    undef $fs_encoding if (defined $fs_encoding and $fs_encoding eq 'bytes');
     _croak_bad_options %opts;
     $opts{timeout} = $self->{_timeout} unless defined $opts{timeout};
     $self->wait_for_master or return undef;
     my ($in, $out, $pid) = $self->open2( { ssh_opts => '-s',
 					   stderr_fh => $stderr_fh,
-					   stderr_discard => $stderr_discard,
-                                           fs_encoding => $fs_encoding },
+					   stderr_discard => $stderr_discard },
 					 'sftp' )
 	or return undef;
 
     my $sftp = Net::SFTP::Foreign->new(transport => [$out, $in, $pid],
 				       dirty_cleanup => 0,
+                                       fs_encoding => $fs_encoding,
 				       %opts);
     if ($sftp->error) {
 	$self->_or_set_error(OSSH_SLAVE_SFTP_FAILED, "unable to create SFTP client", $sftp->error);
@@ -3521,6 +3527,10 @@ shell prompt again, repeat from 3). The best tool for this task is
 probably L<Expect>, used alone, as wrapped by L<Net::SSH::Expect> or
 combined with Net::OpenSSH (see L</Expect>).
 
+There are some devices that support command mode but that only accept
+one command per connection. In that cases, using L<Expect> is also
+probably the best option.
+
 =item Connection fails
 
 B<Q>: I am unable to make the module connect to the remote host...
@@ -3570,7 +3580,7 @@ B<A>: The reported stdio stream is closed or is not attached to a real
 file handle (i.e. it is a tied handle). Redirect it to C</dev/null> or
 to a real file:
 
-  my $out = $ssh->capture({discard_stdin => 1, stderr_to_stdout => 1},
+  my $out = $ssh->capture({stdin_discard => 1, stderr_to_stdout => 1},
                           $cmd);
 
 See also the L<mod_perl> entry above.
