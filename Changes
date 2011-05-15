@@ -1,5 +1,11 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.53_01 May 15, 2011
+        - quoter and glob_quoter fully rewritten from scratch
+        - quoter was not handling "\n" correctly (bug report and work
+          around by Skeeve)
+        - minor doc improvements
+
 0.52  May 9, 2011
         - release as stable
         - skip bad passwd test when IO::Pty is not available
