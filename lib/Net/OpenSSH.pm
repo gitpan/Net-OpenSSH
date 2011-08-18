@@ -1,11 +1,13 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.53_02';
+our $VERSION = '0.53_03';
 
 use strict;
 use warnings;
 
 our $debug ||= 0;
+
+our $FACTORY;
 
 use Carp qw(carp croak);
 use POSIX qw(:sys_wait_h);
@@ -142,8 +144,12 @@ my $IPv6_re = qr((?-xism::(?::[0-9a-fA-F]{1,4}){0,5}(?:(?::[0-9a-fA-F]{1,4}){1,2
 
 sub new {
     ${^TAINT} and &_catch_tainted_args;
+
     my $class = shift;
     @_ & 1 and unshift @_, 'host';
+
+    return $FACTORY->($class, @_) if defined $FACTORY;
+
     my %opts = @_;
 
     my $external_master = delete $opts{external_master};
@@ -202,6 +208,7 @@ sub new {
             $login_handler = delete $opts{login_handler};
         }
     }
+    my $batch_mode = delete $opts{batch_mode};
     my $ctl_path = delete $opts{ctl_path};
     my $ctl_dir = delete $opts{ctl_dir};
     my $ssh_cmd = _first_defined delete $opts{ssh_cmd}, 'ssh';
@@ -249,19 +256,19 @@ sub new {
 
     $default_stdout_file = (delete $opts{default_stdout_discard}
 			    ? '/dev/null'
-			    : delete $opts{default_stdout_discard});
+			    : delete $opts{default_stdout_file});
     $default_stdout_fh = delete $opts{default_stdout_fh}
 	unless defined $default_stdout_file;
 
     $default_stderr_file = (delete $opts{default_stderr_discard}
 			    ? '/dev/null'
-			    : delete $opts{default_stderr_discard});
+			    : delete $opts{default_stderr_file});
     $default_stderr_fh = delete $opts{default_stderr_fh}
 	unless defined $default_stderr_file;
 
     $default_stdin_file = (delete $opts{default_stdin_discard}
 			    ? '/dev/null'
-			    : delete $opts{default_stdin_discard});
+			    : delete $opts{default_stdin_file});
     $default_stdin_fh = delete $opts{default_stdin_fh}
 	unless defined $default_stdin_file;
 
@@ -302,6 +309,7 @@ sub new {
                  _login_handler => $login_handler,
                  _timeout => $timeout,
                  _kill_ssh_on_timeout => $kill_ssh_on_timeout,
+                 _batch_mode => $batch_mode,
                  _home => $home,
                  _external_master => $external_master,
 		 _default_stdin_fh => $default_stdin_fh,
@@ -326,6 +334,12 @@ sub new {
 	if defined $default_stderr_file;
     $self->{_default_stdin_fh} = $self->_open_file('<', $default_stdin_file)
 	if defined $default_stdin_file;
+
+    if ($self->error == OSSH_SLAVE_PIPE_FAILED) {
+        $self->_set_error(OSSH_MASTER_FAILED,
+                          "Unable to create default slave stream: " . $self->error);
+        return $self;
+    }
 
     $self->{_ssh_opts} = [$self->_expand_vars(@ssh_opts)];
     $self->{_master_opts} = [$self->_expand_vars(@master_opts)];
@@ -420,6 +434,12 @@ sub _expand_vars {
 
 sub error { shift->{_error} }
 
+sub die_on_error {
+    my $ssh = shift;
+    $ssh->{_error} and croak(@_ ? "@_: $ssh->{_error}" : $ssh->{_error});
+}
+
+
 sub _is_secure_path {
     my ($self, $path) = @_;
     my @parts = File::Spec->splitdir(Cwd::realpath($path));
@@ -443,7 +463,8 @@ sub _make_ssh_call {
     my @before = @{shift || []};
     my @args = ($self->{_ssh_cmd}, @before,
 		-S => $self->{_ctl_path},
-                @{$self->{_ssh_opts}}, '--', $self->{_host_ssh},
+                @{$self->{_ssh_opts}}, $self->{_host_ssh},
+                '--',
                 (@_ ? "@_" : ()));
     $debug and $debug & 8 and _debug_dump 'call args' => \@args;
     @args;
@@ -583,6 +604,10 @@ sub _connect {
                        : 'keyboard-interactive,password');
         push @master_opts, -o => 'NumberOfPasswordPrompts=1';
     }
+    elsif ($self->{_batch_mode}) {
+        push @master_opts, -o => 'BatchMode=yes';
+    }
+
     if (defined $self->{_key_path}) {
         $pref_auths = 'publickey';
         push @master_opts, -i => $self->{_key_path};
@@ -1395,9 +1420,13 @@ sub _io3 {
     $timeout = $self->{_timeout} unless defined $timeout;
 
     my $has_input = grep { defined and length } @data;
-    croak "remote input channel is not defined but data is available for sending"
-        if ($has_input and !$cin);
-    close $in if ($cin and !$has_input);
+    if ($cin and !$has_input) {
+        close $in;
+        undef $cin;
+    }
+    elsif (!$cin and $has_input) {
+        croak "remote input channel is not defined but data is available for sending"
+    }
 
     my $enc = $self->_find_encoding($encoding);
     if ($enc and @data) {
@@ -2199,11 +2228,15 @@ instead.
 
 =item passphrase => $passphrase
 
-Use given passphrase to open private key.
+Uses given passphrase to open private key.
 
 =item key_path => $private_key_path
 
-Use the key stored on the given file path for authentication.
+Uses the key stored on the given file path for authentication.
+
+=item batch_mode => 1
+
+Disables querying the user for password and passphrases.
 
 =item ctl_dir => $path
 
@@ -2355,9 +2388,9 @@ Set default encodings. See L</Data encoding>.
 
 =item login_handler => \&custom_login_handler
 
-Some remote SSH server may require some custom login/authentication
+Some remote SSH server may require a custom login/authentication
 interaction not natively supported by Net::OpenSSH. In that cases, you
-can use that option to replace the default login logic.
+can use this option to replace the default login logic.
 
 The callback will be invoked repeatly as C<custom_login_handler($ssh,
 $pty, $data)> where C<$ssh> is the current Net::OpenSSH object, C<pty>
@@ -2376,7 +2409,8 @@ See also the sample script C<login_handler.pl> in the C<samples>
 directory.
 
 Usage of this option is incompatible with the C<password> and
-C<passphrase> options.
+C<passphrase> options, you will have to handle password or passphrases
+from the custom handler yourself.
 
 =back
 
@@ -2948,7 +2982,7 @@ parallel as follows:
   }
   for my $host (@hosts) {
     if (my $pid = $pid{$host}) {
-      if (waitpit($pid, 0) > 0) {
+      if (waitpid($pid, 0) > 0) {
         my $exit = ($? >> 8);
         $exit and warn "transfer of file to $host failed ($exit)\n";
       }
@@ -3409,6 +3443,30 @@ under a different user account.
 At a minimum, ensure that C<~www-data/.ssh> (or similar) is not
 accessible through the web server!
 
+=head2 Diverting C<new>
+
+When a code ref is installed at C<$Net::OpenSSH::FACTORY>, calls to new
+will be diverted through it.
+
+That feature can be used to transparently implement connection
+caching, for instance:
+
+  my $old_factory = $Net::OpenSSH::FACTORY;
+  my %cache;
+
+  sub factory {
+    my ($class, %opts) = @_;
+    my $signature = join("\0", $class, map { $_ => $opts{$_} }, sort keys %opts);
+    my $old = $cache{signature};
+    return $old if ($old and $old->error != OSSH_MASTER_FAILED);
+    local $Net::OpenSSH::FACTORY = $old_factory;
+    $cache{$signature} = $class->new(%opts);
+  }
+
+  $Net::OpenSSH::FACTORY = \&factory;
+
+... and I am sure it can be abused in several other ways!
+
 =head2 Other modules
 
 CPAN contains several modules that rely on SSH to perform their duties
@@ -3851,6 +3909,8 @@ upon: L<http://www.openssh.org/donations.html>.
 - async disconnect
 
 - currently wait_for_master does not honor timeout
+
+- auto_discard_streams feature for mod_perl2 and similar environments
 
 Send your feature requests, ideas or any feedback, please!
 
