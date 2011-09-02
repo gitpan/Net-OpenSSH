@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.53_03';
+our $VERSION = '0.53_04';
 
 use strict;
 use warnings;
@@ -239,7 +239,7 @@ sub new {
 
         $master_opts = delete $opts{master_opts};
         if (defined $master_opts) {
-            if (ref($master_opts)) {
+            if (ref $master_opts) {
                 @master_opts = @$master_opts;
             }
             else {
@@ -249,6 +249,10 @@ sub new {
             }
         }
     }
+
+    my $default_ssh_opts = delete $opts{default_ssh_opts};
+    carp "'default_ssh_opts' argument looks like if it should be splited first"
+        if defined $default_ssh_opts and not ref $default_ssh_opts and $default_ssh_opts =~ /^-\w\s+\S/;
 
     my ($default_stdout_fh, $default_stderr_fh, $default_stdin_fh,
 	$default_stdout_file, $default_stderr_file, $default_stdin_file,
@@ -277,8 +281,8 @@ sub new {
     my @ssh_opts;
     # TODO: are those options really requiered or just do they eat on
     # the command line limited length?
-    push @ssh_opts, -o => "User=$user" if defined $user;
-    push @ssh_opts, -o => "Port=$port" if defined $port;
+    push @ssh_opts, -l => $user if defined $user;
+    push @ssh_opts, -p => $port if defined $port;
 
     my $home = do {
 	local $SIG{__DIE__};
@@ -312,6 +316,7 @@ sub new {
                  _batch_mode => $batch_mode,
                  _home => $home,
                  _external_master => $external_master,
+                 _default_ssh_opts => $default_ssh_opts,
 		 _default_stdin_fh => $default_stdin_fh,
 		 _default_stdout_fh => $default_stdout_fh,
 		 _default_stderr_fh => $default_stderr_fh,
@@ -350,8 +355,14 @@ sub new {
     unless (defined $ctl_path) {
         $external_master and croak "external_master is set but ctl_path is not defined";
 
-        $ctl_dir = File::Spec->catdir($self->{_home}, ".libnet-openssh-perl")
-	    unless defined $ctl_dir;
+        unless (defined $ctl_dir) {
+            unless (defined $self->{_home}) {
+                $self->_set_error(OSSH_MASTER_FAILED, "unable to determine home directory for uid $>");
+                return $self;
+            }
+
+            $ctl_dir = File::Spec->catdir($self->{_home}, ".libnet-openssh-perl");
+        }
 
 	my $old_umask = umask 077;
         mkdir $ctl_dir;
@@ -1164,7 +1175,9 @@ sub open_ex {
 
     my $argument_encoding = $self->_delete_argument_encoding(\%opts);
 
-    my @ssh_opts = $self->_expand_vars(_array_or_scalar_to_list delete $opts{ssh_opts});
+    my $ssh_opts = delete $opts{ssh_opts};
+    $ssh_opts = $self->{_default_ssh_opts} unless defined $ssh_opts;
+    my @ssh_opts = $self->_expand_vars(_array_or_scalar_to_list $ssh_opts);
 
     my ($cmd, $close_slave_pty, @args);
     if ($tunnel) {
@@ -2315,14 +2328,24 @@ master connection. For instance:
   my $ssh = Net::OpenSSH->new($host,
       master_opts => [-o => "ProxyCommand corkscrew httpproxy 8080 $host"]);
 
+=item default_ssh_opts => [...]
+
+Default slave SSH command line options for L</open_ex> and derived
+methods.
+
+For instance:
+
+  my $ssh = Net::OpenSSH->new($host,
+      default_ssh_options => [-o => "ConnectionAttempts=0"]);
+
 =item default_stdin_fh => $fh
 
 =item default_stdout_fh => $fh
 
 =item default_stderr_fh => $fh
 
-Default I/O streams for open_ex and derived methods (currently, that
-means any method but C<pipe_in> and C<pipe_out> and I plan to remove
+Default I/O streams for L</open_ex> and derived methods (currently, that
+means any method but L</pipe_in> and L</pipe_out> and I plan to remove
 those exceptions soon!).
 
 For instance:
@@ -2438,7 +2461,7 @@ process listens for new multiplexed connections.
 
 =item ($in, $out, $err, $pid) = $ssh->open_ex(\%opts, @cmd)
 
-I<Note: this is a low level method that, probably, you don't need to use!>
+X<open_ex>I<Note: this is a low level method that, probably, you don't need to use!>
 
 That method starts the command C<@cmd> on the remote machine creating
 new pipes for the IO channels as specified on the C<%opts> hash.
@@ -2818,7 +2841,7 @@ options.
 
 =item ($in, $pid) = $ssh->pipe_in(\%opts, @cmd)
 
-This method is similar to the following Perl C<open> call
+X<pipe_in>This method is similar to the following Perl C<open> call
 
   $pid = open $in, '|-', @cmd
 
@@ -2838,7 +2861,7 @@ Example:
 
 =item ($out, $pid) = $ssh->pipe_out(\%opts, @cmd)
 
-Reciprocal to previous method, it is equivalent to
+X<pipe_out>Reciprocal to previous method, it is equivalent to
 
   $pid = open $out, '-|', @cmd
 
@@ -3400,6 +3423,31 @@ The constructor also accepts C<default_encoding>,
 C<default_stream_encoding> and C<default_argument_encoding> that set the
 defaults.
 
+=head2 Diverting C<new>
+
+When a code ref is installed at C<$Net::OpenSSH::FACTORY>, calls to new
+will be diverted through it.
+
+That feature can be used to transparently implement connection
+caching, for instance:
+
+  my $old_factory = $Net::OpenSSH::FACTORY;
+  my %cache;
+
+  sub factory {
+    my ($class, %opts) = @_;
+    my $signature = join("\0", $class, map { $_ => $opts{$_} }, sort keys %opts);
+    my $old = $cache{signature};
+    return $old if ($old and $old->error != OSSH_MASTER_FAILED);
+    local $Net::OpenSSH::FACTORY = $old_factory;
+    $cache{$signature} = $class->new(%opts);
+  }
+
+  $Net::OpenSSH::FACTORY = \&factory;
+
+... and I am sure it can be abused in several other ways!
+
+
 =head1 3rd PARTY MODULE INTEGRATION
 
 =head2 Expect
@@ -3442,30 +3490,6 @@ under a different user account.
 
 At a minimum, ensure that C<~www-data/.ssh> (or similar) is not
 accessible through the web server!
-
-=head2 Diverting C<new>
-
-When a code ref is installed at C<$Net::OpenSSH::FACTORY>, calls to new
-will be diverted through it.
-
-That feature can be used to transparently implement connection
-caching, for instance:
-
-  my $old_factory = $Net::OpenSSH::FACTORY;
-  my %cache;
-
-  sub factory {
-    my ($class, %opts) = @_;
-    my $signature = join("\0", $class, map { $_ => $opts{$_} }, sort keys %opts);
-    my $old = $cache{signature};
-    return $old if ($old and $old->error != OSSH_MASTER_FAILED);
-    local $Net::OpenSSH::FACTORY = $old_factory;
-    $cache{$signature} = $class->new(%opts);
-  }
-
-  $Net::OpenSSH::FACTORY = \&factory;
-
-... and I am sure it can be abused in several other ways!
 
 =head2 Other modules
 
@@ -3807,6 +3831,25 @@ written in Perl you can use L<App::Daemon> for that (actually, there
 are several CPAN modules that provided that kind of functionality).
 
 In any case, note that you shouldn't use L</spawn> for that.
+
+=item MaxSessions server limit reached
+
+B<Q>: I created an C<$ssh> object and then fork a lot children
+processes which use this object. When the children number is bigger
+than C<MaxSessions> as defined in sshd configuration (defaults to 10),
+trying to fork new remote commands will prompt the user for the
+password.
+
+B<A>: When the slave SSH client gets a response from the remote
+servers saying that the maximum number of sessions for the current
+connection has been reached, it fallbacks to open a new direct
+connection without going through the multiplexing socket.
+
+To stop that for happening, the following hack can be used:
+
+  $ssh = Net::OpenSSH->new(host,
+      default_ssh_opts => ['-oConnectionAttempts=0'],
+      ...);
 
 =back
 
