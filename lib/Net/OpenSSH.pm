@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.53_04';
+our $VERSION = '0.53_05';
 
 use strict;
 use warnings;
@@ -142,6 +142,59 @@ my $deobfuscate = $obfuscate;
 # regexp from Regexp::IPv6
 my $IPv6_re = qr((?-xism::(?::[0-9a-fA-F]{1,4}){0,5}(?:(?::[0-9a-fA-F]{1,4}){1,2}|:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})))|[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}:(?:[0-9a-fA-F]{1,4}|:)|(?::(?:[0-9a-fA-F]{1,4})?|(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))))|:(?:(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))|[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4})?|))|(?::(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))|:[0-9a-fA-F]{1,4}(?::(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))|(?::[0-9a-fA-F]{1,4}){0,2})|:))|(?:(?::[0-9a-fA-F]{1,4}){0,2}(?::(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))|(?::[0-9a-fA-F]{1,4}){1,2})|:))|(?:(?::[0-9a-fA-F]{1,4}){0,3}(?::(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))|(?::[0-9a-fA-F]{1,4}){1,2})|:))|(?:(?::[0-9a-fA-F]{1,4}){0,4}(?::(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))|(?::[0-9a-fA-F]{1,4}){1,2})|:))));
 
+sub parse_connection_opts {
+    my ($class, $opts) = @_;
+    my ($user, $passwd, $ipv6, $host, $port, $host_squared);
+
+    my $target = delete $opts->{host};
+    defined $target or croak "mandatory host argument missing";
+
+    ($user, $passwd, $ipv6, $host, $port) =
+        $target =~ m{^
+                       \s*               # space
+                       (?:
+                         ([^\@:]+)       # username
+                         (?::(.*))?      # : password
+                         \@              # @
+                       )?
+                       (?:               # host
+                          (              #   IPv6...
+                            \[$IPv6_re\] #     [IPv6]
+                            |            #     or
+                            $IPv6_re     #     IPv6
+                          )
+                          |              #   or
+                          ([^\[\]\@:]+)  #   hostname / ipv4
+                       )
+                       (?::([^\@:]+))?   # port
+                       \s*               # space
+                     $}ix
+                or croak "bad host/target '$target' specification";
+
+    if (defined $ipv6) {
+        ($host) = $ipv6 =~ /^\[?(.*?)\]?$/;
+        $host_squared = "[$host]";
+    }
+    else {
+        $host_squared = $host;
+    }
+
+    $user = delete $opts->{user} unless defined $user;
+    $port = delete $opts->{port} unless defined $port;
+    $passwd = delete $opts->{passwd} unless defined $passwd;
+    $passwd = delete $opts->{password} unless defined $passwd;
+
+    wantarray and return ($host, $port, $user, $passwd, $host_squared);
+
+    my %r = ( user => $user,
+              password => $passwd,
+              host => $host,
+              host_squared => $host_squared,
+              port => $port );
+    $r{ipv6} = 1 if defined $ipv6;
+    return \%r;
+}
+
 sub new {
     ${^TAINT} and &_catch_tainted_args;
 
@@ -156,48 +209,14 @@ sub new {
     # reuse_master is an obsolete alias:
     $external_master = delete $opts{reuse_master} unless defined $external_master;
 
-    my ($user, $passwd, $ipv6, $host, $port, $host_ssh, $passphrase, $key_path, $login_handler);
-    my $target = delete $opts{host};
-    if (defined $target) {
-        ($user, $passwd, $ipv6, $host, $port) =
-            $target =~ m{^
-                        \s*               # space
-                        (?:
-                          ([^\@:]+)       # username
-                          (?::(.*))?      # : password
-                          \@              # @
-                        )?
-                        (?:               # host
-                           (              #   IPv6...
-                             \[$IPv6_re\] #     [IPv6]
-                             |            #     or
-                             $IPv6_re     #     IPv6
-                           )
-                           |              #   or
-                           ([^\[\]\@:]+)  #   hostname / ipv4
-                        )
-                        (?::([^\@:]+))?   # port
-                        \s*               # space
-                        $}ix
-                or croak "bad host/target '$target' specification";
-
-        if (defined $ipv6) {
-            ($host_ssh) = $ipv6 =~ /^\[?(.*?)\]?$/;
-            $host = "[$host_ssh]";
-        }
-        else {
-            $host_ssh = $host;
-        }
-    }
-    else {
-        $external_master or croak "mandatory host argument missing";
-        $host_ssh = 'UNKNOWN'
+    if (not defined $opts{host} and defined $external_master) {
+        $opts{host} = 'UNKNOWN';
     }
 
-    $user = delete $opts{user} unless defined $user;
-    $port = delete $opts{port} unless defined $port;
-    $passwd = delete $opts{passwd} unless defined $passwd;
-    $passwd = delete $opts{password} unless defined $passwd;
+    my ($host, $port, $user, $passwd, $host_squared) = $class->parse_connection_opts(\%opts);
+
+    my ($passphrase, $key_path, $login_handler);
+
     unless (defined $passwd) {
         $key_path = delete $opts{key_path};
         $passwd = delete $opts{passphrase};
@@ -208,6 +227,7 @@ sub new {
             $login_handler = delete $opts{login_handler};
         }
     }
+
     my $batch_mode = delete $opts{batch_mode};
     my $ctl_path = delete $opts{ctl_path};
     my $ctl_dir = delete $opts{ctl_dir};
@@ -304,7 +324,7 @@ sub new {
 		 _rsync_cmd => $rsync_cmd,
                  _pid => undef,
                  _host => $host,
-		 _host_ssh => $host_ssh,
+		 _host_squared => $host_squared,
                  _user => $user,
                  _port => $port,
                  _passwd => $obfuscate->($passwd),
@@ -474,7 +494,7 @@ sub _make_ssh_call {
     my @before = @{shift || []};
     my @args = ($self->{_ssh_cmd}, @before,
 		-S => $self->{_ctl_path},
-                @{$self->{_ssh_opts}}, $self->{_host_ssh},
+                @{$self->{_ssh_opts}}, $self->{_host_squared},
                 '--',
                 (@_ ? "@_" : ()));
     $debug and $debug & 8 and _debug_dump 'call args' => \@args;
@@ -495,7 +515,9 @@ sub _make_scp_call {
     my @before = @{shift || []};
     my @args = ($self->_scp_cmd, @before,
 		-o => "ControlPath=$self->{_ctl_path}",
-                @{$self->{_ssh_opts}}, '--', @_);
+                -S => $self->{_ssh_cmd},
+                (defined $self->{_port} ? (-P => $self->{_port}) : ()),
+                '--', @_);
 
     $debug and $debug & 8 and _debug_dump 'scp call args' => \@args;
     @args;
@@ -1054,11 +1076,20 @@ sub make_remote_command {
     my $self = shift;
     $self->wait_for_master or return;
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
-    my $tty = delete $opts{tty};
     my @ssh_opts = _array_or_scalar_to_list delete $opts{ssh_opts};
-    my @args = $self->_quote_args(\%opts, @_);
-    _croak_bad_options %opts;
+    my $tty = delete $opts{tty};
     push @ssh_opts, ($tty ? '-qtt' : '-T') if defined $tty;
+    my $tunnel = delete $opts{tunnel};
+    my (@args);
+    if ($tunnel) {
+        @_ == 2 or croak "two arguments are required for tunnel command";
+        push @ssh_opts, "-W" . join(":", @_);
+    }
+    else {
+        @args = $self->_quote_args(\%opts, @_);
+    }
+    _croak_bad_options %opts;
+
     my @call = $self->_make_ssh_call(\@ssh_opts, @args);
     if (wantarray) {
 	$debug and $debug & 16 and _debug_dump make_remote_command => \@call;
@@ -1794,9 +1825,11 @@ sub _scp_get_args {
     my $target = (@_ > 1 ? pop @_ : '.');
     $target =~ m|^[^/]*:| and $target = "./$target";
 
-    my @src = map "$self->{_host}:$_", $self->_quote_args({quote_args => 1,
-							   glob_quoting => $glob},
-							  @_);
+    my $prefix = $self->{_host_squared};
+    $prefix = "$self->{_user}\@$prefix" if defined $self->{_user};
+    my @src = map "$prefix:$_", $self->_quote_args({quote_args => 1,
+                                                    glob_quoting => $glob},
+                                                   @_);
     ($self, \%opts, $target, @src);
 }
 
@@ -1822,9 +1855,12 @@ sub _scp_put_args {
     my $glob = delete $opts{glob};
     my $glob_flags = ($glob ? delete $opts{glob_flags} || 0 : undef);
 
-    my $target = $self->{_host}. ':' . ( @_ > 1
-					 ? $self->_quote_args({quote_args => 1}, pop(@_))
-					 : '');
+    my $prefix = $self->{_host_squared};
+    $prefix = "$self->{_user}\@$prefix" if defined $self->{_user};
+
+    my $target = $prefix . ':' . ( @_ > 1
+                                                 ? $self->_quote_args({quote_args => 1}, pop(@_))
+                                                 : '');
 
     my @src = @_;
     if ($glob) {
@@ -1867,11 +1903,13 @@ sub _scp {
     my $async = delete $opts{async};
     my $ssh_opts = delete $opts{ssh_opts};
     my $timeout = delete $opts{timeout};
+    my $verbose = delete $opts{verbose};
     _croak_bad_options %opts;
 
     my @opts;
     @opts = @$ssh_opts if $ssh_opts;
     push @opts, '-q' if $quiet;
+    push @opts, '-v' if $verbose;
     push @opts, '-r' if $recursive;
     push @opts, '-p' if $copy_attrs;
     push @opts, '-l', $bwlimit if defined $bwlimit;
@@ -2958,6 +2996,10 @@ By default, C<scp> is called with the quiet flag C<-q> enabled in
 order to suppress progress information. This option allows reenabling
 the progress indication bar.
 
+=item verbose => 1
+
+Calls C<scp> with the C<-v> flag.
+
 =item recursive => 1
 
 Copy files and directories recursively.
@@ -3462,6 +3504,29 @@ running in the remote host. You can do it as follows:
 Then, you will be able to use the new Expect object in C<$expect> as
 usual.
 
+=head2 Net::Telnet
+
+This example is adapted from L<Net::Telnet> documentation:
+
+  my ($pty, $pid) = $ssh->open2pty({stderr_to_stdout => 1})
+    or die "unable to start remote shell: " . $ssh->error;
+  my $telnet = Net::Telnet->new(-fhopen => $pty,
+                                -prompt => '/.*\$ $/',
+                                -telnetmode => 0,
+                                -cmd_remove_mode => 1,
+                                -output_record_separator => "\r");
+
+  $telnet->waitfor(-match => $telnet->prompt,
+                   -errmode => "return")
+    or die "login failed: " . $telnet->lastline;
+
+  my @lines = $telnet->cmd("who");
+
+  ...
+
+  $telnet->close;
+  waitpid($pid, 0);
+
 =head2 mod_perl and mod_perl2
 
 L<mod_perl> and L<mod_perl2> tie STDIN and STDOUT to objects that are
@@ -3638,7 +3703,7 @@ The requirements for that directory and all its parents are:
 
 =over 4
 
-=item * 
+=item *
 
 They have to be owned by the user executing the script or by root
 
@@ -3651,6 +3716,14 @@ else has permissions to perform write operations on them.
 
 The constructor option C<strict_mode> disables these security checks,
 but you should not use it unless you understand its implications.
+
+=item 5 - file system must support sockets
+
+Some file systems (as for instance FAT or AFS) do not support placing
+sockets inside them.
+
+Ensure that the C<ctl_dir> path does not lay into one of those file
+systems.
 
 =back
 
@@ -3850,6 +3923,21 @@ To stop that for happening, the following hack can be used:
   $ssh = Net::OpenSSH->new(host,
       default_ssh_opts => ['-oConnectionAttempts=0'],
       ...);
+
+=item Running remote commands with sudo
+
+B<Q>: How can I run remote commands using C<sudo> to become root first?
+
+B<A>: The simplest way is to tell C<sudo> to read the password from
+stdin with the C<-S> flag and to do not use cached credentials
+with the C<-k> flag. You may also like to use the C<-p> flag to tell
+C<sudo> to print an empty prompt. For instance:
+
+  my @out = $ssh->capture({stdin_data => $sudo_passwd},
+                          'sudo', '-Sk',
+                          '-p', '',
+                          '--',
+                          @cmd);
 
 =back
 
