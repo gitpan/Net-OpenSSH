@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.53_05';
+our $VERSION = '0.54';
 
 use strict;
 use warnings;
@@ -954,8 +954,8 @@ sub _load_module {
     1
 }
 
-my $noquote_class = '\\w/\\-=@';
-my $glob_class    = '*?\\[\\],{}:!.^~';
+my $noquote_class = '.\\w/\\-=@';
+my $glob_class    = '*?\\[\\],{}:!^~';
 
 sub _arg_quoter {
     sub {
