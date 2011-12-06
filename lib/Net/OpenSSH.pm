@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.54';
+our $VERSION = '0.55';
 
 use strict;
 use warnings;
@@ -539,7 +539,9 @@ sub _make_rsync_call {
     my $self = shift;
     my $before = shift;
     my @ssh_args = $self->_make_ssh_call($before);
-    pop @ssh_args; # rsync adds the target host itself
+    splice @ssh_args, -2, 1; # rsync adds the target host itself,
+                             # remove it from the list leaving the
+                             # double dash after it.
     my $transport = join(' ', $self->_rsync_quote(@ssh_args));
     my @args = ( $self->{_rsync_cmd},
 		 -e => $transport,

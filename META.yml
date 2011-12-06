@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               Net-OpenSSH
-version:            0.54
+version:            0.55
 abstract:           ~
 author:
     - Salvador Fandino <sfandino@yahoo.com>
