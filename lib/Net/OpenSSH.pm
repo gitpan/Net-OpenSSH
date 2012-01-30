@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.57';
+our $VERSION = '0.58_01';
 
 use strict;
 use warnings;
@@ -357,7 +357,8 @@ sub new {
                  _default_stream_encoding => $default_stream_encoding,
                  _default_argument_encoding => $default_argument_encoding,
 		 _expand_vars => $expand_vars,
-		 _vars => $vars };
+		 _vars => $vars,
+               };
     bless $self, $class;
 
     # default file handles are opened so late in order to have the
@@ -701,6 +702,11 @@ sub _connect {
         return undef;
     }
     unless ($pid) {
+        if ($debug and $debug & 512) {
+            require Net::OpenSSH::OSTracer;
+            Net::OpenSSH::OSTracer->trace;
+        }
+
         $mpty->make_slave_controlling_terminal if $mpty;
 
 	$self->_master_redirect('STDOUT');
@@ -2436,7 +2442,7 @@ methods.
 For instance:
 
   my $ssh = Net::OpenSSH->new($host,
-      default_ssh_options => [-o => "ConnectionAttempts=0"]);
+      default_ssh_opts => [-o => "ConnectionAttempts=0"]);
 
 =item default_stdin_fh => $fh
 
@@ -3791,6 +3797,67 @@ systems.
 
 =back
 
+=head1 DEBUGGING
+
+Debugging of Net::OpenSSH internals is controlled through the variable
+C<$Net::OpenSSH::debug>.  Every bit of this variable activates
+debugging of some subsystem as follows:
+
+=over 4
+
+=item bit 1 - errors
+
+Dumps changes on the internal object attribute where errors are stored.
+
+=item bit 2 - ctl_path
+
+Dumps information about ctl_path calculation and the tests performed
+on that directory in order to decide if it is secure to place the
+multiplexing socket inside.
+
+=item bit 4 - connecting
+
+Dumps information about the establishment of new master connections.
+
+=item bit 8 - commands and arguments
+
+Dumps the command and arguments for every system/exec call.
+
+=item bit 16 - command execution
+
+Dumps information about the progress of command execution.
+
+=item bit 32 - destruction
+
+Dumps information about the destruction of Net::OpenSSH objects and
+the termination of the SSH master processes.
+
+=item bit 64 - IO loop
+
+Dumps information about the progress of the IO loop on capture
+operations.
+
+=item bit 128 - IO hexdumps
+
+Generates hexdumps of the information that travels through the SSH
+streams inside capture operations.
+
+=item bit 512 - OS tracing of the master process
+
+Use the module L<Net::OpenSSH::OSTracer> to trace the SSH master
+process at the OS level.
+
+=back
+
+For instance, in order to activate all the debugging flags, you can
+use:
+
+  $Net::OpenSSH::debug = ~0;
+
+Note that the meaning of the flags and the information generated is
+only intended for debugging of the module and may change without
+notice between releases.
+
 =head1 FAQ
 
 Frequent questions about the module:
@@ -3997,11 +4064,31 @@ stdin with the C<-S> flag and to do not use cached credentials
 with the C<-k> flag. You may also like to use the C<-p> flag to tell
 C<sudo> to print an empty prompt. For instance:
 
-  my @out = $ssh->capture({stdin_data => $sudo_passwd},
+  my @out = $ssh->capture({stdin_data => "$sudo_passwd\n"},
                           'sudo', '-Sk',
                           '-p', '',
                           '--',
                           @cmd);
+
+If the version of sudo installed on the remote host does not support
+the C<-S> flag (it tells sudo to read the password from its STDIN
+stream), you can do it as follows:
+
+  my @out = $ssh->capture({tty => 1,
+                           stdin_data => "$sudo_passwd\n"},
+                           'sudo', '-k',
+                           '-p', '',
+                           '--',
+                           @cmd);
+
+This may generate an spurious and harmless warning from the SSH master
+connection (because we are requesting allocation of a tty on the
+remote side and locally we are attaching it to a regular pair of
+pipes).
+
+If for whatever reason the methods described above fail, you can
+always revert to using Expect to talk to the remote C<sudo>. See the
+C<sample/expect.pl> script from this module distribution.
 
 =back
 
@@ -4118,7 +4205,7 @@ Send your feature requests, ideas or any feedback, please!
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2008-2011 by Salvador FandiE<ntilde>o
+Copyright (C) 2008-2012 by Salvador FandiE<ntilde>o
 (sfandino@yahoo.com)
 
 This library is free software; you can redistribute it and/or modify
