@@ -1,5 +1,13 @@
 Revision history for Perl extension Net::OpenSSH.
 
+0.58_02  Apr 16, 2012
+        - strict_mode lets pass world-writable directories if they
+          have the restricted deletion flag set
+        - implement sshfs import and export methods
+        - add forward_agent feature
+        - do not disable ssh-agent when using password authentication
+        - some documentation improvements
+
 0.58_01  Jan 30, 2012
         - add new documentation section about debugging
         - new helper module Net::OpenSSH::OSTracer added
@@ -143,6 +151,7 @@ Revision history for Perl extension Net::OpenSSH.
         - implement stdintout_dpipe_is_parent feature
 
 0.51_02  Feb 10, 2011
+>>>>>>> master
         - add support for test method
         - add support for dpipe feature
         - simplify _wait_for_master code
