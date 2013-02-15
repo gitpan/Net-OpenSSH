@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.59';
+our $VERSION = '0.60';
 
 use strict;
 use warnings;
@@ -317,8 +317,7 @@ sub new {
     push @ssh_opts, -p => $port if defined $port;
 
     my $home = do {
-	local $SIG{__DIE__};
-	local $@;
+	local ($@, $SIG{__DIE__});
 	eval { Cwd::realpath((getpwuid $>)[7]) }
     };
 
@@ -911,8 +910,7 @@ sub _wait_for_master {
             return undef;
         }
         if ($state eq 'waiting_for_login_handler') {
-            local $SIG{__DIE__};
-            local $@;
+            local ($@, $SIG{__DIE__});
             if (eval { $login_handler->($self, $mpty, $bout) }) {
                 $state = 'waiting_for_mux_socket';
                 next;
@@ -1015,15 +1013,13 @@ sub _load_module {
     my ($module, $version) = @_;
     $loaded_module{$module} ||= do {
 	do {
-	    local $SIG{__DIE__};
-	    local $@;
+	    local ($@, $SIG{__DIE__});
 	    eval "require $module; 1"
 	} or croak "unable to load Perl module $module";
         1
     };
     if (defined $version) {
-	local $SIG{__DIE__};
-	local $@;
+	local ($@, $SIG{__DIE__});
 	my $mv = eval "\$${module}::VERSION" || 0;
 	(my $mv1 = $mv) =~ s/_\d*$//;
 	croak "$module version $version required, $mv is available"
@@ -1502,7 +1498,7 @@ sub _encode {
     my $self = shift;
     my $enc = shift;
     if (defined $enc and @_) {
-        local $@;
+        local ($@, $SIG{__DIE__});
         eval {
             for (@_) {
                 defined or next;
@@ -1532,7 +1528,7 @@ sub _encode_args {
 sub _decode {
     my $self = shift;
     my $enc = shift;
-    local $@;
+    local ($@, $SIG{__DIE__});
     eval {
         for (@_) {
             defined or next;
@@ -1968,12 +1964,14 @@ sub _scp_put_args {
 sub scp_put {
     ${^TAINT} and &_catch_tainted_args;
     my ($self, $opts, $target, @src) = _scp_put_args @_;
+    return unless $self;
     $self->_scp($opts, @src, $target);
 }
 
 sub rsync_put {
     ${^TAINT} and &_catch_tainted_args;
     my ($self, $opts, $target, @src) = _scp_put_args @_;
+    return unless $self;
     $self->_rsync($opts, @src, $target);
 }
 
@@ -2189,13 +2187,11 @@ sub sshfs_export {
 sub DESTROY {
     my $self = shift;
     my $pid = $self->{_pid};
-    local $@;
+    local ($@, $SIG{__DIE__});
     $debug and $debug & 2 and _debug("DESTROY($self, pid: ", $pid, ")");
     if ($pid and $self->{_perl_pid} == $$ and $self->{_thread_generation} == $thread_generation) {
 	$debug and $debug & 32 and _debug("killing master");
-        local $?;
-	local $!;
-
+        local ($?, $!);
 	unless ($self->{_wfm_state}) {
 	    # we have successfully created the master connection so we
 	    # can send control commands:
