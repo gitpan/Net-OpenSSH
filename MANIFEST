@@ -8,12 +8,17 @@ lib/Net/OpenSSH.pm
 lib/Net/OpenSSH/Constants.pm
 lib/Net/OpenSSH/ConnectionCache.pm
 lib/Net/OpenSSH/OSTracer.pm
+lib/Net/OpenSSH/ModuleLoader.pm
+lib/Net/OpenSSH/ShellQuoter.pm
+lib/Net/OpenSSH/ShellQuoter/POSIX.pm
+lib/Net/OpenSSH/ShellQuoter/csh.pm
 t/common.pm
 t/test_server_key
 t/test_server_key.pub
 t/test_user_key
 t/test_user_key.pub
 t/known_hosts
+t/quoting.t
 sample/expect.pl
 sample/change_passwd.pl
 sample/autosudo.pl
@@ -22,5 +27,4 @@ sample/login_handler.pl
 sample/mod_perl_openssh.pm
 sample/keep_in_sync.pl
 sample/password_from_data.pl
-META.yml                                 Module YAML meta-data (added by MakeMaker)
-META.json                                Module JSON meta-data (added by MakeMaker)
+META.yml                                 Module meta-data (added by MakeMaker)

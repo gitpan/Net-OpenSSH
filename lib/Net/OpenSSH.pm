@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.61_01';
+our $VERSION = '0.61_02';
 
 use strict;
 use warnings;
@@ -17,6 +17,8 @@ use Cwd ();
 use Scalar::Util ();
 use Errno ();
 use Net::OpenSSH::Constants qw(:error);
+use Net::OpenSSH::ModuleLoader;
+use Net::OpenSSH::ShellQuoter;
 
 my $thread_generation = 0;
 
@@ -247,7 +249,7 @@ sub new {
     my $kill_ssh_on_timeout = delete $opts{kill_ssh_on_timeout};
     my $strict_mode = _first_defined delete $opts{strict_mode}, 1;
     my $async = delete $opts{async};
-    my $target_os = _first_defined delete $opts{target_os}, 'unix';
+    my $remote_shell = _first_defined delete $opts{remote_shell}, 'POSIX';
     my $expand_vars = delete $opts{expand_vars};
     my $vars = _first_defined delete $opts{vars}, {};
     my $default_encoding = delete $opts{default_encoding};
@@ -258,6 +260,7 @@ sub new {
     my $forward_agent = delete $opts{forward_agent};
     $forward_agent and $passphrase and
         croak "agent forwarding can not be used when a passphrase has also been given";
+    my $forward_X11 = delete $opts{forward_X11};
 
     my ($master_opts, @master_opts,
         $master_stdout_fh, $master_stderr_fh,
@@ -352,6 +355,7 @@ sub new {
                  _batch_mode => $batch_mode,
                  _home => $home,
                  _forward_agent => $forward_agent,
+                 _forward_X11 => $forward_X11,
                  _external_master => $external_master,
                  _default_ssh_opts => $default_ssh_opts,
 		 _default_stdin_fh => $default_stdin_fh,
@@ -361,7 +365,7 @@ sub new {
 		 _master_stderr_fh => $master_stderr_fh,
 		 _master_stdout_discard => $master_stdout_discard,
 		 _master_stderr_discard => $master_stderr_discard,
-		 _target_os => $target_os,
+		 _remote_shell => $remote_shell,
                  _default_stream_encoding => $default_stream_encoding,
                  _default_argument_encoding => $default_argument_encoding,
 		 _expand_vars => $expand_vars,
@@ -642,9 +646,12 @@ sub _connect {
     $self->_set_error;
 
     my $timeout = int((($self->{_timeout} || 90) + 2)/3);
+    my $ssh_flags= '-2MN';
+    $ssh_flags .= ($self->{_forward_agent} ? 'A' : 'a') if defined $self->{_forward_agent};
+    $ssh_flags .= ($self->{_forward_X11} ? 'X' : 'x');
     my @master_opts = (@{$self->{_master_opts}},
                        -o => "ServerAliveInterval=$timeout",
-                       '-x2MN');
+                      $ssh_flags);
 
     my ($mpty, $use_pty, $pref_auths);
     $use_pty = 1 if defined $self->{_login_handler};
@@ -662,10 +669,6 @@ sub _connect {
     if (defined $self->{_key_path}) {
         $pref_auths = 'publickey';
         push @master_opts, -i => $self->{_key_path};
-    }
-
-    if (defined $self->{_forward_agent}) {
-        push @master_opts, ($self->{_forward_agent} ? '-A' : '-a');
     }
 
     my $proxy_command = $self->{_proxy_command};
@@ -1008,74 +1011,12 @@ sub _make_pipe {
     return;
 }
 
-my %loaded_module;
-sub _load_module {
-    my ($module, $version) = @_;
-    $loaded_module{$module} ||= do {
-	do {
-	    local ($@, $SIG{__DIE__});
-	    eval "require $module; 1"
-	} or croak "unable to load Perl module $module";
-        1
-    };
-    if (defined $version) {
-	local ($@, $SIG{__DIE__});
-	my $mv = eval "\$${module}::VERSION" || 0;
-	(my $mv1 = $mv) =~ s/_\d*$//;
-	croak "$module version $version required, $mv is available"
-	    if $mv1 < $version;
+sub _remote_quoter {
+    my ($self, $style) = @_;
+    if (ref $self and not defined $style) {
+        return $self->{remote_quoter} ||= Net::OpenSSH::ShellQuoter->quoter($self->{remote_shell});
     }
-    1
-}
-
-my $noquote_class = '.\\w/\\-@,:';
-my $glob_class    = '*?\\[\\],{}:!^~';
-
-sub _arg_quoter {
-    sub {
-        my $quoted = join '',
-            map { ( m|^'$|                  ? "\\'"  :
-                    m|^[$noquote_class]*$|o ? $_     :
-                                              "'$_'" ) } split /(')/, $_[0];
-        length $quoted ? $quoted : "''";
-    }
-}
-
-sub _arg_quoter_glob {
-    sub {
-	my $arg = shift;
-        my @parts;
-        while ((pos $arg ||0) < length $arg) {
-            if ($arg =~ m|\G'|gc) {
-                push @parts, "\\'";
-            }
-            elsif ($arg =~ m|\G([$noquote_class$glob_class]+)|gco) {
-                push @parts, $1;
-            }
-            elsif ($arg =~ m|\G(\\[$glob_class\\])|gco) {
-                push @parts, $1;
-            }
-            elsif ($arg =~ m|\G\\|gc) {
-                push @parts, '\\\\'
-            }
-            elsif ($arg =~ m|\G([^$glob_class\\']+)|gco) {
-                push @parts, "'$1'";
-            }
-            else {
-                require Data::Dumper;
-                $arg =~ m|\G(.+)|gc;
-                die "Internal error: unquotable string:\n". Data::Dumper::Dumper($1) ."\n";
-            }
-        }
-        my $quoted = join('', @parts);
-        length $quoted ? $quoted : "''";
-
-	# my $arg = shift;
-        # return $arg if $arg =~ m|^[\w/\-+=?\[\],{}\@!.^~]+$|;
-	# return "''" if $arg eq '';
-        # $arg =~ s|(?<!\\)([^\w/\-+=*?\[\],{}:\@!.^\\~])|ord($1) > 127 ? $1 : $1 eq "\n" ? "'\n'" : "\\$1"|ge;
-	# $arg;
-    }
+    Net::OpenSSH::ShellQuoter->quoter($style);
 }
 
 sub _quote_args {
@@ -1088,11 +1029,9 @@ sub _quote_args {
     $quote = (@_ > 1) unless defined $quote;
 
     if ($quote) {
-	my $quoter_glob = $self->_arg_quoter_glob;
-	my $quoter = ($glob_quoting
-		      ? $quoter_glob
-		      : $self->_arg_quoter);
-
+        my $style = delete $opts->{quote_style};
+        my $quoter = $self->_remote_quoter($style);
+        my $quote_method = ($glob_quoting ? 'quote_glob' : 'quote');
 	# foo   => $quoter
 	# \foo  => $quoter_glob
 	# \\foo => no quoting at all and disable extended quoting as it is not safe
@@ -1100,7 +1039,7 @@ sub _quote_args {
 	for (@_) {
 	    if (ref $_) {
 		if (ref $_ eq 'SCALAR') {
-		    push @quoted, $quoter_glob->($self->_expand_vars($$_));
+		    push @quoted, $quoter->quote_glob($self->_expand_vars($$_));
 		}
 		elsif (ref $_ eq 'REF' and ref $$_ eq 'SCALAR') {
 		    push @quoted, $self->_expand_vars($$$_);
@@ -1111,19 +1050,22 @@ sub _quote_args {
 		}
 	    }
 	    else {
-		push @quoted, $quoter->($self->_expand_vars($_));
+		push @quoted, $quoter->$quote_method($self->_expand_vars($_));
 	    }
 	}
 
 	if ($quote_extended) {
-	    push @quoted, '</dev/null' if $opts->{stdin_discard};
-	    if ($opts->{stdout_discard}) {
-		push @quoted, '>/dev/null';
-		push @quoted, '2>&1' if ($opts->{stderr_to_stdout} || $opts->{stderr_discard})
-	    }
-	    else {
-		push @quoted, '2>/dev/null' if $opts->{stderr_discard};
-	    }
+            my @fragments;
+            if ( $opts->{stdout_discard} and
+                 ( $opts->{stderr_discard} or $opts->{stderr_to_stdout} ) ) {
+                @fragments = ('stdout_and_stderr_discard');
+                push @fragments, 'stdin_discard' if $opts->{stdin_discard};
+            }
+            else {
+                @fragments = grep $opts->{$_}, qw(stdin_discard stdout_discard
+                                                  stderr_discard stderr_to_stdout);
+            }
+            push @quoted, $quoter->shell_fragments(@fragments);
 	}
 	wantarray ? @quoted : join(" ", @quoted);
     }
@@ -1152,10 +1094,15 @@ sub make_remote_command {
     my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
     my @ssh_opts = _array_or_scalar_to_list delete $opts{ssh_opts};
     my $tty = delete $opts{tty};
-    push @ssh_opts, ($tty ? '-qtt' : '-T') if defined $tty;
+    my $ssh_flags = '';
+    $ssh_flags .= ($tty ? 'qtt' : 'T') if defined $tty;
     if ($self->{_forward_agent}) {
         my $forward_agent = delete $opts{forward_agent};
-        push @ssh_opts, ($forward_agent ? '-A' : '-a') if defined $forward_agent;
+        $ssh_flags .= ($forward_agent ? 'A' : 'a') if defined $forward_agent;
+    }
+    if ($self->{_forward_X11}) {
+        my $forward_X11 = delete $opts{forward_X11};
+        $ssh_flags .= ($forward_X11 ? 'X' : 'x');
     }
     my $tunnel = delete $opts{tunnel};
     my (@args);
@@ -1168,6 +1115,7 @@ sub make_remote_command {
     }
     _croak_bad_options %opts;
 
+    push @ssh_opts, "-$ssh_flags" if length $ssh_flags;
     my @call = $self->_make_ssh_call(\@ssh_opts, @args);
     if (wantarray) {
 	$debug and $debug & 16 and _debug_dump make_remote_command => \@call;
@@ -1286,10 +1234,15 @@ sub open_ex {
     my $ssh_opts = delete $opts{ssh_opts};
     $ssh_opts = $self->{_default_ssh_opts} unless defined $ssh_opts;
     my @ssh_opts = $self->_expand_vars(_array_or_scalar_to_list $ssh_opts);
+    my $ssh_flags = '';
 
     if ($self->{_forward_agent}) {
         my $forward_agent = delete $opts{forward_agent};
-        push @ssh_opts, ($forward_agent ? '-A' : '-a') if defined $forward_agent;
+        $ssh_flags .= ($forward_agent ? 'A' : 'a') if defined $forward_agent;
+    }
+    if ($self->{_forward_X11}) {
+        my $forward_X11 = delete $opts{forward_X11};
+        $ssh_flags .= ($forward_X11 ? 'X' : 'x');
     }
 
     my ($cmd, $close_slave_pty, @args);
@@ -1304,7 +1257,7 @@ sub open_ex {
 	}
 
 	my $tty = delete $opts{tty};
-	push @ssh_opts, ($tty ? '-qtt' : '-T') if defined $tty;
+	$ssh_flags .= ($tty ? 'qtt' : 'T') if defined $tty;
 
 	$cmd = delete $opts{_cmd} || 'ssh';
 	$opts{quote_args_extended} = 1
@@ -1382,6 +1335,8 @@ sub open_ex {
 	}
 	_check_is_system_fh STDERR => $werr;
     }
+
+    push @ssh_opts, "-$ssh_flags" if length $ssh_flags;
 
     my @call = ( $tunnel         ? $self->_make_tunnel_call(\@ssh_opts, @args) :
                  $cmd eq 'ssh'   ? $self->_make_ssh_call(\@ssh_opts, @args)    :
@@ -1666,7 +1621,7 @@ sub _io3 {
 _sub_options spawn => qw(stderr_to_stdout stdin_discard stdin_fh stdin_file stdout_discard
                          stdout_fh stdout_file stderr_discard stderr_fh stderr_file
                          stdinout_dpipe stdinout_dpipe_make_parent quote_args tty ssh_opts tunnel
-                         encoding argument_encoding forward_agent);
+                         encoding argument_encoding forward_agent forward_X11);
 sub spawn {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1677,7 +1632,7 @@ sub spawn {
 }
 
 _sub_options open2 => qw(stderr_to_stdout stderr_discard stderr_fh stderr_file quote_args
-                         tty ssh_opts tunnel encoding argument_encoding forward_agent);
+                         tty ssh_opts tunnel encoding argument_encoding forward_agent forward_X11);
 sub open2 {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1692,7 +1647,7 @@ sub open2 {
 }
 
 _sub_options open2pty => qw(stderr_to_stdout stderr_discard stderr_fh stderr_file quote_args tty
-                            close_slave_pty ssh_opts encoding argument_encoding forward_agent);
+                            close_slave_pty ssh_opts encoding argument_encoding forward_agent forward_X11);
 sub open2pty {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1708,7 +1663,7 @@ sub open2pty {
 }
 
 _sub_options open2socket => qw(stderr_to_stdout stderr_discard stderr_fh stderr_file quote_args tty
-                               ssh_opts tunnel encoding argument_encoding forward_agent);
+                               ssh_opts tunnel encoding argument_encoding forward_agent forward_X11);
 sub open2socket {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1721,7 +1676,7 @@ sub open2socket {
     return ($socket, $pid);
 }
 
-_sub_options open3 => qw(quote_args tty ssh_opts encoding argument_encoding forward_agent);
+_sub_options open3 => qw(quote_args tty ssh_opts encoding argument_encoding forward_agent forward_X11);
 sub open3 {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1738,7 +1693,7 @@ sub open3 {
 }
 
 _sub_options open3pty => qw(quote_args tty close_slave_pty ssh_opts
-                            encoding argument_encoding forward_agent);
+                            encoding argument_encoding forward_agent forward_X11);
 sub open3pty {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1758,7 +1713,7 @@ sub open3pty {
 _sub_options system => qw(stdout_discard stdout_fh stdin_discard stdout_file stdin_fh stdin_file
                           quote_args stderr_to_stdout stderr_discard stderr_fh stderr_file
                           stdinout_dpipe stdinout_dpipe_make_parent tty ssh_opts tunnel encoding
-                          argument_encoding forward_agent);
+                          argument_encoding forward_agent forward_X11);
 sub system {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1787,7 +1742,7 @@ sub system {
 _sub_options test => qw(stdout_discard stdout_fh stdin_discard stdout_file stdin_fh stdin_file
                         quote_args stderr_to_stdout stderr_discard stderr_fh stderr_file
                         stdinout_dpipe stdinout_dpipe_make_parent tty ssh_opts timeout stdin_data
-                        encoding stream_encoding argument_encoding forward_agent);
+                        encoding stream_encoding argument_encoding forward_agent forward_X11);
 sub test {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1812,7 +1767,7 @@ sub test {
 
 _sub_options capture => qw(stderr_to_stdout stderr_discard stderr_fh stderr_file
                            stdin_discard stdin_fh stdin_file quote_args tty ssh_opts tunnel
-                           encoding argument_encoding forward_agent);
+                           encoding argument_encoding forward_agent forward_X11);
 sub capture {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -1841,7 +1796,7 @@ sub capture {
 
 _sub_options capture2 => qw(stdin_discard stdin_fh stdin_file
                             quote_args tty ssh_opts encoding
-                            argument_encoding forward_agent);
+                            argument_encoding forward_agent forward_X11);
 sub capture2 {
     ${^TAINT} and &_catch_tainted_args;
     my $self = shift;
@@ -2466,6 +2421,10 @@ By default it is inferred from the C<ssh> one.
 
 Name or full path to C<rsync> binary. Defaults to C<rsync>.
 
+=item remote_shell => $name
+
+Name of the remote shell. Used to select the argument quoter backend.
+
 =item timeout => $timeout
 
 Maximum acceptable time that can elapse without network traffic or any
@@ -2533,6 +2492,10 @@ Enables forwarding of the authentication agent.
 
 This option can not be used when passing a passphrase (via
 L</passphrase>) to unlock the login private key.
+
+=item forward_X11 => 1
+
+Enables forwarding of the X11 protocol
 
 =item default_stdin_fh => $fh
 
@@ -2811,6 +2774,13 @@ See L</"Shell quoting"> below.
 Enables/disables forwarding of the authentication agent.
 
 This option can only be used when agent forwarding has been previously
+requested on the constructor.
+
+=item forward_X11 => $bool
+
+Enables/disables forwarding of the X11 protocol.
+
+This option can only be used when X11 forwarding has been previously
 requested on the constructor.
 
 =item ssh_opts => \@opts
@@ -3522,24 +3492,29 @@ the following debug flag:
 
   $Net::OpenSSH::debug |= 16;
 
-Also, the current shell quoting implementation expects a shell
-compatible with Unix C<sh> in the remote side. It will not work as
-expected if for instance, the remote machine runs Windows, VMS or it
-is a router.
+By default, the module assumes the remote shell is some variant of a
+POSIX or Bourne shell (C<bash>, C<dash>, C<ksh>, etc.). If this is not
+the case, the construction option C<remote_shell> can be used to
+select an alternative quoting mechanism.
 
-As a workaround, do any required quoting yourself and pass the quoted
-command as a string so that no further quoting is performed. For
-instance:
+For instance:
+
+  $ssh = Net::OpenSSH->new($host, remote_shell => 'csh');
+  $ssh->system(echo => "hard\n to\n  quote\n   argument!");
+
+The only alternative quoter currently implemented is C<csh>. One for
+MS-DOS is planed.
+
+In any case, you can always do the quoting yourself and pass the
+quoted remote command as a single string:
 
   # for VMS
   $ssh->system('DIR/SIZE NFOO::USERS:[JSMITH.DOCS]*.TXT;0');
 
-I plan to add support for different quoting mechanisms in the
-future... if you need it now, just ask for it!!!
-
-The current quoting mechanism does not handle possible aliases defined
-by the remote shell. In that case, to force execution of the command
-instead of the alias, the full path to the command must be used.
+Note that the current quoting mechanism does not handle possible
+aliases defined by the remote shell. In that case, to force execution
+of the command instead of the alias, the full path to the command must
+be used.
 
 =head2 Timeouts
 
