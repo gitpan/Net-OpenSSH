@@ -1,22 +1,20 @@
----
-abstract: 'Perl SSH client package implemented on top of OpenSSH'
+--- #YAML:1.0
+name:               Net-OpenSSH
+version:            0.61_08
+abstract:           Perl SSH client package implemented on top of OpenSSH
 author:
-  - 'Salvador Fandino <sfandino@yahoo.com>'
-build_requires:
-  ExtUtils::MakeMaker: 0
+    - Salvador Fandino <sfandino@yahoo.com>
+license:            unknown
+distribution_type:  module
 configure_requires:
-  ExtUtils::MakeMaker: 0
-dynamic_config: 1
-generated_by: 'ExtUtils::MakeMaker version 6.66, CPAN::Meta::Converter version 2.120921'
-license: unknown
-meta-spec:
-  url: http://module-build.sourceforge.net/META-spec-v1.4.html
-  version: 1.4
-name: Net-OpenSSH
-no_index:
-  directory:
-    - t
-    - inc
+    ExtUtils::MakeMaker:  0
 requires:
-  Test::More: 0
-version: 0.61_07
+    Test::More:  0
+no_index:
+    directory:
+        - t
+        - inc
+generated_by:       ExtUtils::MakeMaker version 6.48
+meta-spec:
+    url:      http://module-build.sourceforge.net/META-spec-v1.4.html
+    version:  1.4
