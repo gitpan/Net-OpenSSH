@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.61_16';
+our $VERSION = '0.61_17';
 
 use strict;
 use warnings;
@@ -898,8 +898,8 @@ sub _wait_for_master {
     if ($reset) {
         $$bout = '';
         $state = ( (defined $passwd and $pid) ? 'waiting_for_password_prompt' :
-                    (defined $login_handler)   ? 'waiting_for_login_handler'  :
-                                                 'waiting_for_mux_socket' );
+                   (defined $login_handler)   ? 'waiting_for_login_handler'  :
+                                                'waiting_for_mux_socket' );
     }
 
     my $ctl_path = $self->{_ctl_path};
@@ -915,7 +915,7 @@ sub _wait_for_master {
     }
 
     my $old_tcpgrp;
-    if ($self->{_master_setpgrp} and not $async and not $self->{_batch_mode}) {
+    if ($pid and $self->{_master_setpgrp} and not $async and not $self->{_batch_mode}) {
         $old_tcpgrp = POSIX::tcgetpgrp(0);
         if ($old_tcpgrp > 0) {
             # let the master process ask for passwords at the TTY
@@ -926,6 +926,7 @@ sub _wait_for_master {
         }
     }
 
+    # Loop until the mux socket appears or something goes wrong:
     local $self->{_error_prefix} = [@{$self->{_error_prefix}},
 				    "unable to establish master SSH connection"];
     while (1) {
@@ -936,8 +937,7 @@ sub _wait_for_master {
             unless (-S $ctl_path) {
                 $self->_set_error(OSSH_MASTER_FAILED,
                                   "bad ssh master at $ctl_path, object is not a socket");
-                $self->_kill_master;
-                return undef;
+                goto kill_master_and_fail;
             }
             my $check = $self->_master_ctl('check');
             if (defined $check) {
@@ -965,28 +965,32 @@ sub _wait_for_master {
 		}
                 $self->_or_set_error(OSSH_MASTER_FAILED, $error);
             }
-	    $self->_kill_master;
-            return undef;
+            goto kill_master_and_fail;
         }
         $debug and $debug & 4 and _debug "file object not yet found at $ctl_path, state: $state";
 
         if ($self->{_perl_pid} != $$ or $self->{_thread_generation} != $thread_generation) {
             $self->_set_error(OSSH_MASTER_FAILED,
                               "process was forked or threaded before SSH connection had been established");
+            # just return, the thread creating the mess should clean it all up!
             return undef;
         }
+
         if (!$pid) {
+            # when using an external master the mux socket must be
+            # there from the first time
             $self->_set_error(OSSH_MASTER_FAILED,
                               "socket does not exist");
-            return undef;
+            goto fail;
         }
         elsif (waitpid($pid, WNOHANG) == $pid or $! == Errno::ECHILD) {
             my $error = "master process exited unexpectedly";
             $error =  "bad pass" . ($self->{_passphrase} ? 'phrase' : 'word') . " or $error"
                 if defined $self->{_passwd};
             $self->_set_error(OSSH_MASTER_FAILED, $error);
-            return undef;
+            goto fail; # master has already died
         }
+
         if ($state eq 'waiting_for_login_handler') {
             local ($@, $SIG{__DIE__});
             if (eval { $login_handler->($self, $mpty, $bout) }) {
@@ -996,7 +1000,7 @@ sub _wait_for_master {
             if ($@) {
                 $self->_set_error(OSSH_MASTER_FAILED,
                                   "custom login handler failed: $@");
-                return undef;
+                goto kill_master_and_fail;
             }
         }
         else {
@@ -1012,8 +1016,7 @@ sub _wait_for_master {
                             $self->_set_error(OSSH_MASTER_FAILED,
                                               "the authenticity of the target host can't be established, the remote host "
                                               . "public key is probably not present on the '~/.ssh/known_hosts' file");
-                            $self->_kill_master;
-                            return undef;
+                            goto kill_master_and_fail;
                         }
                         if ($$bout =~ s/^(.*:)//s) {
                             $debug and $debug & 4 and _debug "passwd/passphrase requested ($1)";
@@ -1035,8 +1038,21 @@ sub _wait_for_master {
         }
     }
     $self->_set_error(OSSH_MASTER_FAILED, "login timeout");
+
+ kill_master_and_fail:
     $self->_kill_master;
-    undef;
+
+ fail:
+    if ($pid and $self->{_master_setpgrp} and $old_tcpgrp) {
+        if ($debug and $debug & 4) {
+            my $pgrp = getpgrp($pid);
+            my $tcpgrp = POSIX::tcgetpgrp(0);
+            $debug and _debug "ssh pid: $pid, pgrp: $pgrp \$\$: $$, tcpgrp: $tcpgrp old_tcppgrp: $old_tcpgrp";
+        }
+        local $SIG{TTOU} = 'IGNORE';
+        POSIX::tcsetpgrp(0, $old_tcpgrp);
+    }
+    return undef;
 }
 
 sub _master_ctl {
@@ -2388,7 +2404,7 @@ box). The bottleneck is the latency intrinsic to the protocol, so
 Net::OpenSSH is probably as fast as an SSH client can be.
 
 Being based on OpenSSH is also an advantage: a proved, stable, secure
-(to paranoic levels), interoperable and well maintained implementation
+(to paranoid levels), inseparably and well maintained implementation
 of the SSH protocol is used.
 
 On the other hand, Net::OpenSSH does not work on Windows, not even
@@ -2582,7 +2598,7 @@ For instance, the following code connects to several remote machines
 in parallel:
 
   my (%ssh, %ls);
-  # multiple connections are stablished in parallel:
+  # multiple connections are established in parallel:
   for my $host (@hosts) {
       $ssh{$host} = Net::OpenSSH->new($host, async => 1);
   }
@@ -2704,7 +2720,7 @@ Some remote SSH server may require a custom login/authentication
 interaction not natively supported by Net::OpenSSH. In that cases, you
 can use this option to replace the default login logic.
 
-The callback will be invoked repeatly as C<custom_login_handler($ssh,
+The callback will be invoked repeatedly as C<custom_login_handler($ssh,
 $pty, $data)> where C<$ssh> is the current Net::OpenSSH object, C<pty>
 a L<IO::Pty> object attached to the slave C<ssh> process tty and
 C<$data> a reference to an scalar you can use at will.
@@ -2727,7 +2743,7 @@ from the custom handler yourself.
 =item master_setpgrp => 1
 
 When this option is set, the master process is run as a different
-process group. As a consecuence it will not die when the user presses
+process group. As a consequence it will not die when the user presses
 Ctrl-C at the terminal.
 
 In order to allow the master SSH process to request any information
@@ -2736,7 +2752,7 @@ process while the connection is established (using
 L<POSIX/tcsetpgrp>). Afterwards, the terminal controlling process is
 reset.
 
-This feature is higly experimental. Report any problems you may find,
+This feature is highly experimental. Report any problems you may find,
 please.
 
 =back
@@ -2795,9 +2811,9 @@ value (C<$in>).
 Similar to C<stdin_pipe>, but instead of a regular pipe it uses a
 pseudo-tty (pty).
 
-Note that on some OSs (i.e. HP-UX, AIX), ttys are not reliable. They
-can overflow when large chunks are written or when data is
-written faster than it is read.
+Note that on some operating systems (i.e. HP-UX, AIX), ttys are not
+reliable. They can overflow when large chunks are written or when data
+is written faster than it is read.
 
 =item stdin_fh => $fh
 
@@ -2847,7 +2863,7 @@ Uses /dev/null as the remote process stdout stream.
 
 =item stdinout_socket => 1
 
-Creates a new socketpair, attachs the stdin an stdout streams of the
+Creates a new socketpair, attaches the stdin an stdout streams of the
 slave SSH process to one end and returns the other as the first value
 (C<$in>) and undef for the second (C<$out>).
 
@@ -2906,7 +2922,7 @@ When a pseudo pty is used for the stdin stream, the slave side is
 automatically closed on the parent process after forking the ssh
 command.
 
-This option dissables that feature, so that the slave pty can be
+This option disables that feature, so that the slave pty can be
 accessed on the parent process as C<$pty-E<gt>slave>. It will have to
 be explicitly closed (see L<IO::Pty|IO::Pty>)
 
@@ -2920,11 +2936,11 @@ Sets the remote shell. Allows to change the argument quoting mechanism
 in a per-command fashion.
 
 This may be useful when interacting with a Windows machine where
-argument parsing is done at the command level in custom ways.
+argument parsing may be done at the command level in custom ways.
 
 Example:
 
-  $ssh->system({remote_shell => 'MSCmd'}, echo => $line);
+  $ssh->system({remote_shell => 'MSWin'}, echo => $line);
   $ssh->system({remote_shell => 'MSCmd,MSWin'}, type => $file);
 
 =item forward_agent => $bool
@@ -2987,7 +3003,7 @@ not die when the user presses Ctrl+C at the console. See also
 L<perlfunc/setpgrp>.
 
 Using this option without also setting C<master_setpgrp> on the
-constructor call is mostly useles as the signal will be delivered to
+constructor call is mostly useless as the signal will be delivered to
 the master process and all the remote commands aborted.
 
 This feature is experimental.
@@ -2996,7 +3012,7 @@ This feature is experimental.
 
 Runs the command C<@cmd> on the remote machine.
 
-Returns true on sucess, undef otherwise.
+Returns true on success, undef otherwise.
 
 The error status is set to C<OSSH_SLAVE_CMD_FAILED> when the remote
 command exits with a non zero code (the code is available from C<$?>,
@@ -3286,7 +3302,7 @@ master connection.
 
 When transferring several files, the target argument must point to an
 existing directory. If only one file is to be transferred, the target
-argument can be a directory or a file name or can be ommited. For
+argument can be a directory or a file name or can be omitted. For
 instance:
 
   $ssh->scp_get({glob => 1}, '/var/tmp/foo*', '/var/tmp/bar*', '/tmp');
@@ -3460,7 +3476,7 @@ When the connection has been established by calling the constructor
 with the C<async> option, this call allows one to advance the process.
 
 If C<$async> is true, it will perform any work that can be done
-inmediately without waiting (for instance, entering the password or
+immediately without waiting (for instance, entering the password or
 checking for the existence of the multiplexing socket) and then
 return. If a false value is given, it will finalize the connection
 process and wait until the multiplexing socket is available.
@@ -3553,7 +3569,7 @@ They return the C<$pid> of the C<sshfs> process or of the slave C<ssh>
 process used to proxy it. Killing that process unmounts the file
 system, though, it may be probably better to use L<fusermount(1)>.
 
-The options acepted are as follows:
+The options accepted are as follows:
 
 =over
 
@@ -3625,7 +3641,7 @@ will correctly handle the spaces in the program path.
 
 The shell quoting mechanism implements some extensions (for instance,
 performing redirections to /dev/null on the remote side) that can be
-dissabled with the option C<quote_args_extended>:
+disabled with the option C<quote_args_extended>:
 
   $ssh->system({ stderr_discard => 1,
                  quote_args => 1, quote_args_extended => 0 },
@@ -3679,8 +3695,11 @@ For instance:
   $ssh = Net::OpenSSH->new($host, remote_shell => 'csh');
   $ssh->system(echo => "hard\n to\n  quote\n   argument!");
 
-The only alternative quoter currently implemented is C<csh>. One for
-MS-DOS is planed.
+Currently there are quoters available for POSIX (Bourne) compatible
+shells, C<csh> and the two Windows variants C<MSWin> (for servers
+using L<Win32::CreateProcess>, see
+L<Net::OpenSSH::ShellQuoter::MSWin>) and C<MSCmd> (for servers using
+C<cmd.exe>, see L<Net::OpenSSH::ShellQuoter::MSCmd>).
 
 In any case, you can always do the quoting yourself and pass the
 quoted remote command as a single string:
@@ -3695,7 +3714,7 @@ be used.
 
 =head2 Timeouts
 
-In order to stop remote processes when they timeout, the ideal aproach
+In order to stop remote processes when they timeout, the ideal approach
 would be to send them signals through the SSH connection as specified
 by the protocol standard.
 
@@ -4006,9 +4025,9 @@ use. For instance:
                            ssh_cmd => "/opt/OpenSSH/5.8/bin/ssh")
 
 Some hardware vendors (i.e. Sun) include custom versions of OpenSSH
-bundled with the operative system. In priciple, Net::OpenSSH should
+bundled with the operative system. In principle, Net::OpenSSH should
 work with these SSH clients as long as they are derived from some
-version of OpenSSH recent enough. Anyway, I advise you to use the real
+version of OpenSSH recent enough. Anyway, my advise is to use the real
 OpenSSH software if you can!
 
 =item 3 - run ssh from the command line
@@ -4039,7 +4058,7 @@ implementations may use other file locations).
 
 Maintaining the server keys when several hosts and clients are
 involved may be somewhat inconvenient, so most SSH clients, by
-default, when a new connection is stablished to a host whose key is
+default, when a new connection is established to a host whose key is
 not in the C<known_hosts> file, show the key and ask the user if he
 wants the key copied there.
 
@@ -4187,7 +4206,7 @@ command mode and interactive mode.
 
 Command mode is designed to run single commands on the remote host. It
 opens an SSH channel between both hosts, ask the remote computer to
-run some given command and when it finnish the channel is closed. It
+run some given command and when it finish the channel is closed. It
 is what you get, for instance, when you run something as...
 
   $ ssh my.unix.box cat foo.txt
@@ -4205,7 +4224,7 @@ some custom program specially targeted and limited to the task of
 configuring the device.
 
 Usually, the SSH server running on these devices does not support
-command mode. It unconditionally attachs the restricted shell to any
+command mode. It unconditionally attaches the restricted shell to any
 incoming SSH connection and waits for the user to enter commands
 through the redirected stdin stream.
 
@@ -4224,7 +4243,7 @@ probably the best option.
 
 B<Q>: I am unable to make the module connect to the remote host...
 
-B<A>: Have you read the trubleshooting section? (see
+B<A>: Have you read the troubleshooting section? (see
 L</TROUBLESHOOTING>).
 
 =item Disable StrictHostKeyChecking
@@ -4233,7 +4252,7 @@ B<Q>: Why don't you run C<ssh> with C<StrictHostKeyChecking=no>?
 
 B<A>: Using C<StrictHostKeyChecking=no> relaxes the default security
 level of SSH and it will be relatively easy to end with a
-misconfigured SSH (for instance, when C<known_hosts> is unwriteable)
+misconfigured SSH (for instance, when C<known_hosts> is unwritable)
 that could be forged to connect to a bad host in order to perform
 man-in-the-middle attacks, etc.
 
@@ -4359,7 +4378,7 @@ password.
 
 B<A>: When the slave SSH client gets a response from the remote
 servers saying that the maximum number of sessions for the current
-connection has been reached, it fallbacks to open a new direct
+connection has been reached, it fall backs to open a new direct
 connection without going through the multiplexing socket.
 
 To stop that for happening, the following hack can be used:
@@ -4501,7 +4520,8 @@ upon: L<http://www.openssh.org/donations.html>.
 
 - *** add tests for scp, rsync and sftp methods
 
-- *** add support for more target OSs (quoting, OpenVMS, Windows & others)
+- *** add support for more target operating systems (quoting, OpenVMS,
+  Windows & others)
 
 - better timeout handling in system and capture methods
 
