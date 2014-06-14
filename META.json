@@ -36,11 +36,11 @@
          }
       }
    },
-   "release_status" : "testing",
+   "release_status" : "stable",
    "resources" : {
       "repository" : {
          "url" : "https://github.com/salva/p5-Net-OpenSSH"
       }
    },
-   "version" : "0.61_18"
+   "version" : "0.62"
 }
