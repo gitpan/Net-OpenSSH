@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.63_01';
+our $VERSION = '0.63_02';
 
 use strict;
 use warnings;
@@ -641,27 +641,56 @@ sub master_exited {
     undef;
 }
 
+my @kill_signal = qw(0 0 TERM TERM TERM KILL);
+
 sub _kill_master {
-    my $self = shift;
-    my $pid = delete $self->{_pid};
+    my ($self, $async) = @_;
+    my $pid = $self->{_pid};
     $debug and $debug & 32 and _debug '_kill_master: ', $pid;
-    if ($pid and $self->{_perl_pid} == $$ and $self->{_thread_generation} == $thread_generation) {
-	local $SIG{CHLD} = sub {};
-        for my $sig (0, 0, 'TERM', 'TERM', 'TERM', 'KILL', 'KILL') {
-            if ($sig) {
-		$debug and $debug & 32 and _debug "killing master with signal $sig";
-		kill $sig, $pid
-		    or return;
-	    }
-	    for (0..5) {
-		my $r = waitpid($pid, WNOHANG);
+    if ($pid) {
+        if ($self->{_perl_pid} == $$ and $self->{_thread_generation} == $thread_generation) {
+            local $SIG{CHLD} = sub {} unless $async;
+
+            my $now = time;
+            my $start = $self->{_kill_master_start} //= $now;
+            $self->{_kill_master_last} //= $now;
+            $self->{_kill_master_count} //= 0;
+
+            while(1) {
+                if ($self->{_kill_master_last} < $now) {
+                    $self->{_kill_master_last} = $now;
+                    my $sig = $kill_signal[$self->{_kill_master_count}++] // 'KILL';
+                    $debug and $debug & 32 and _debug "killing master $$ with signal $sig";
+                    kill $sig, $pid;
+                }
+                my $r = waitpid($pid, WNOHANG);
                 $debug and $debug & 32 and _debug "waitpid(master: $pid) => pid: $r, rc: $!";
-		return if ($r == $pid or $! == Errno::ECHILD);
-		select(undef, undef, undef, 0.2);
-	    }
+                last if $r == $pid or $! == Errno::ECHILD();
+                if ($self->{_kill_master_count} > 20) {
+                    # FIXME: remove the hard-coded 20 retries?
+                    $debug and $debug & 32 and _debug "unable to kill SSH master process, giving up";
+                    last;
+                }
+                return if $async;
+                select(undef, undef, undef, 0.2);
+                $now = time;
+            }
         }
-	warn "unable to kill SSH master connection (pid: $pid)";
+        else {
+            $debug and $debug & 32 and _debug("not killing master SSH ($pid) started from " .
+                                              "process $self->{_perl_pid}/$self->{_thread_generation}" .
+                                              ", current $$/$thread_generation");
+        }
+        delete $self->{_pid};
     }
+    1;
+}
+
+sub disconnect {
+    my ($self, $async) = @_;
+    $self->{_wfm_state} = 'killing_master';
+    $self->{_wfm_error} = 'aborted';
+    $self->_wait_for_master($async);
 }
 
 sub _check_is_system_fh {
@@ -812,7 +841,7 @@ sub _waitpid {
             if (defined $time_limit) {
                 while (1) {
                     # TODO: we assume that all OSs return 0 when the
-                    # process is still running, that may not be true!
+                    # process is still running, that may be wrong!
                     $r = waitpid($pid, WNOHANG) and last;
                     my $remaining = $time_limit - time;
                     if ($remaining <= 0) {
@@ -833,7 +862,7 @@ sub _waitpid {
             else {
                 $r = waitpid($pid, 0);
             }
-            $debug and $debug & 16 and _debug "_waitpid($pid) => pid: $r, rc: $!";
+            $debug and $debug & 16 and _debug "_waitpid($pid) => pid: $r, rc: $?, err: $!";
 	    if ($r == $pid) {
 		if ($?) {
 		    my $signal = ($? & 255);
@@ -905,6 +934,11 @@ sub _wait_for_master {
                                                 'waiting_for_mux_socket' );
     }
 
+    if ($state eq 'killing_master') {
+        $debug and $debug & 4 and _debug "resuming master killing";
+        goto kill_master_and_fail;
+    }
+
     my $ctl_path = $self->{_ctl_path};
     my $dt = ($async ? 0 : 0.1);
     my $timeout = $self->{_timeout};
@@ -938,8 +972,7 @@ sub _wait_for_master {
         if (-e $ctl_path) {
             $debug and $debug & 4 and _debug "file object found at $ctl_path";
             unless (-S $ctl_path) {
-                $self->_set_error(OSSH_MASTER_FAILED,
-                                  "bad ssh master at $ctl_path, object is not a socket");
+                $self->{_wfm_error} //= "bad ssh master at $ctl_path, object is not a socket";
                 goto kill_master_and_fail;
             }
             my $check = $self->_master_ctl('check');
@@ -958,15 +991,14 @@ sub _wait_for_master {
                         }
                         return 1;
                     }
-		    $error = "bad ssh master at $ctl_path, socket owned by pid $1 (pid $pid expected)";
+                    $self->{_wfm_error} //= "bad ssh master at $ctl_path, socket owned by pid $1 (pid $pid expected)";
 		}
 		elsif ($check =~ /illegal option/i) {
-		    $error = "OpenSSH 4.1 or later required";
+                    $self->{_wfm_error} //= "OpenSSH 4.1 or later required";
 		}
 		else {
-		    $error = "Unknown error";
+		    $self->{_wfm_error} //= "Unknown error";
 		}
-                $self->_or_set_error(OSSH_MASTER_FAILED, $error);
             }
             goto kill_master_and_fail;
         }
@@ -982,15 +1014,13 @@ sub _wait_for_master {
         if (!$pid) {
             # when using an external master the mux socket must be
             # there from the first time
-            $self->_set_error(OSSH_MASTER_FAILED,
-                              "socket does not exist");
+            $self->{_wfm_error} = "socket does not exist";
             goto fail;
         }
         elsif (waitpid($pid, WNOHANG) == $pid or $! == Errno::ECHILD) {
-            my $error = "master process exited unexpectedly";
-            $error =  "bad pass" . ($self->{_passphrase} ? 'phrase' : 'word') . " or $error"
+            $self->{_wfm_error} = "master process exited unexpectedly";
+            $self->{_wfm_error} =  "bad pass" . ($self->{_passphrase} ? 'phrase' : 'word') . " or $self->{_wfm_error}"
                 if defined $self->{_passwd};
-            $self->_set_error(OSSH_MASTER_FAILED, $error);
             goto fail; # master has already died
         }
 
@@ -1001,8 +1031,7 @@ sub _wait_for_master {
                 next;
             }
             if ($@) {
-                $self->_set_error(OSSH_MASTER_FAILED,
-                                  "custom login handler failed: $@");
+                $self->{_wfm_error} //= "custom login handler failed: $@";
                 goto kill_master_and_fail;
             }
         }
@@ -1019,9 +1048,8 @@ sub _wait_for_master {
 
                     if ($state eq 'waiting_for_passwd_prompt') {
                         if ($$bout =~ /The authenticity of host.*can't be established/si) {
-                            $self->_set_error(OSSH_MASTER_FAILED,
-                                              "the authenticity of the target host can't be established, the remote host "
-                                              . "public key is probably not present on the '~/.ssh/known_hosts' file");
+                            $self->{_wfm_error} //= "the authenticity of the target host can't be established, the remote host "
+                                . "public key is probably not present on the '~/.ssh/known_hosts' file";
                             goto kill_master_and_fail;
                         }
 
@@ -1034,7 +1062,7 @@ sub _wait_for_master {
                     }
                     elsif (length($passwd_prompt) and $$bout =~ /^(.*$passwd_prompt)\s*$/s) {
                         $debug and $debug & 4 and _debug "passwd/passphrase requested again ($1)";
-                        $self->_set_error(OSSH_MASTER_FAILED, "password authentication failed");
+                        $self->{_wfm_error} //= "password authentication failed";
                         goto kill_master_and_fail;
                     }
                     next;
@@ -1049,10 +1077,16 @@ sub _wait_for_master {
             select(undef, undef, undef, $dt);
         }
     }
+    $self->{_wfm_error} //= "login timeout";
     $self->_set_error(OSSH_MASTER_FAILED, "login timeout");
 
  kill_master_and_fail:
-    $self->_kill_master;
+    unless ($self->_kill_master($async)) {
+        if ($async) {
+            $self->{_wfm_state} = 'killing_master';
+            return;
+        }
+    }
 
  fail:
     if ($pid and $self->{_master_setpgrp} and $old_tcpgrp) {
@@ -1064,40 +1098,31 @@ sub _wait_for_master {
         local $SIG{TTOU} = 'IGNORE';
         POSIX::tcsetpgrp(0, $old_tcpgrp);
     }
+    $self->_set_error(OSSH_MASTER_FAILED, delete($self->{_wfm_error}) // 'unknown error');
     return undef;
 }
 
 sub _master_ctl {
-    my ($self, $cmd) = @_;
+    my $self = shift;
+    my %opts = (ref $_[0] eq 'HASH' ? %{shift()} : ());
+    my $cmd = shift;
+
     local $self->{_error_prefix} = [@{$self->{_error_prefix}},
                                     "control command failed"];
-    $self->capture({ encoding => 'bytes', # don't let the encoding
-					  # stuff go in the way
+    $self->capture({ %opts,
+                     encoding => 'bytes', # don't let the encoding
+					  # stuff get in the way
 		     stdin_discard => 1, tty => 0,
                      stderr_to_stdout => 1, ssh_opts => [-O => $cmd]});
 }
 
 sub stop {
-    # FIXME: this method currently fails because of a bug in ssh.
     my ($self, $timeout) = @_;
     my $pid = $self->{_pid};
-    $self->_master_ctl('stop');
-    if (not $self->error           and
-        $pid                       and
-        $self->{_perl_pid} == $$   and
-        $self->{_thread_generation} == $thread_generation) {
-
-        local $self->{_kill_ssh_on_timeout};
-        if ($self->_waitpid($pid, $timeout)) {
-            delete $self->{_pid};
-            $self->_set_error(OSSH_MASTER_FAILED, "master ssh connection stopped");
-            return 1;
-        }
-        else {
-            return $self->_kill_master;
-        }
-    }
-    undef;
+    local $self->{_kill_ssh_on_timeout} = 1;
+    $self->_master_ctl({timeout => $timeout},
+                       'stop');
+    $self->_kill_master;
 }
 
 sub _make_pipe {
@@ -2958,8 +2983,8 @@ See L</"Shell quoting"> below.
 
 =item remote_shell => $shell
 
-Sets the remote shell. Allows to change the argument quoting mechanism
-in a per-command fashion.
+Sets the remote shell. Allows one to change the argument quoting
+mechanism in a per-command fashion.
 
 This may be useful when interacting with a Windows machine where
 argument parsing may be done at the command level in custom ways.
@@ -3353,11 +3378,11 @@ Calls C<scp> with the C<-v> flag.
 
 =item recursive => 1
 
-Copy files and directories recursively.
+Copies files and directories recursively.
 
 =item glob => 1
 
-Allow expansion of shell metacharacters in the sources list so that
+Enables expansion of shell metacharacters in the sources list so that
 wildcards can be used to select files.
 
 =item glob_flags => $flags
@@ -4216,6 +4241,118 @@ Note that the meaning of the flags and the information generated is
 only intended for debugging of the module and may change without
 notice between releases.
 
+If you are using password authentication, enabling debugging for
+L<IO::Tty> may also show interesting information:
+
+    IO::Tty::DEBUG = 1;
+
+=head1 SECURITY
+
+B<Q>: Is this module secure?
+
+B<A>: Well, it tries to be!
+
+From a security standpoint the aim of this module is to be as secure
+as OpenSSH, your operating system, your shell and in general your
+environment allow it to be.
+
+It does not take any shortcut just to make your life easier if that
+means lowering the security level (for instance, disabling
+C<StrictHostKeyChecking> by default).
+
+In code supporting features that are not just proxied to OpenSSH,
+the module tries to keep the same standards of security as OpenSSH
+(for instance, checking directory and file permissions when placing
+the multiplexing socket).
+
+On the other hand, and keeping with OpenSSH philosophy, the module
+lets you disable most (all?) of those security measures. But just
+because it lets you do it it doesn't mean it is a good idea to do
+so!!!
+
+If you are a novice programmer or SSH user, and googling you have just
+found some flag that you don't understand but that seems to magically
+solve your connection problems... well, believe me, it is probably a
+bad idea to use it. Ask somebody how really knows first!
+
+Just to make thinks clear, if your code contains any of the keywords
+from the (non-exclusive) list below and you don't know why, you are
+probably wrecking the security of the SSH protocol:
+
+  strict_mode
+  StrictHostKeyChecking
+  UserKnownHostsFile
+
+Other considerations related to security you may like to know are as
+follows:
+
+=over 4
+
+=item Taint mode
+
+The module supports working in taint mode.
+
+If you are in an exposed environment, you should probably enable it
+for your script in order to catch any unchecked command for being
+executed in the remote side.
+
+=item Web environments
+
+It is a bad idea to establish SSH connections from your webserver
+because if it becomes compromised in any way, the attacker would be
+able to use the credentials from your script to connect to the remote
+host and do anything he wishes there.
+
+=item Command quoting
+
+The module can quote commands and arguments for you in a flexible
+and powerful way.
+
+This is a feature you should use as it reduces the possibility of some
+attacker being able to inject and run arbitrary commands on the remote
+machine (and even for scripts that are not exposed it is always
+advisable to enable argument quoting).
+
+Having said that, take into consideration that argument-quoting is
+just a hack to emulate the invoke-without-a-shell feature of Perl
+builtins such as C<system> and alike. There may be bugs(*) on the
+quoting code, your particular shell may have different quoting rules
+with unhandled corner cases or whatever. If your script is exposed to
+the outside, you should check your inputs and restrict what you accept
+as valid.
+
+[* even if this is one of the parts of the module more intensively
+tested!]
+
+=item Shellshock
+
+(see L<Shellshock|http://en.wikipedia.org/wiki/Shellshock_%28software_bug%29>)
+
+When executing local commands, the module always avoids calling the
+shell so in this way it is not affected by Shellshock.
+
+Unfortunately, some commands (C<scp>, C<rsync> and C<ssh> when the
+C<ProxyCommand> option is used) invoke other commands under the hood
+using the user shell. That opens the door to local Shellshock
+exploitation.
+
+On the remote side invocation of the shell is unavoidable due to the
+protocol design.
+
+By default, SSH does not forward environment variables but some Linux
+distributions explicitly change the default OpenSSH configuration to
+enable forwarding and acceptance of some specific ones (for instance
+C<LANG> and C<LC_*> on Debian and derivatives, Fedora does alike) and
+this also opens the door to Shellshock exploitation.
+
+Note that the shell used to invoke commands is not C</bin/sh> but the
+user shell as configured in C</etc/passwd>, PAM or whatever
+authentication subsystem is used by the local or remote operating
+system. Debian users, don't think you are not affected because
+your C</bin/sh> points to C<dash>!
+
+=back
+
 =head1 FAQ
 
 Frequent questions about the module:
@@ -4254,16 +4391,19 @@ command mode. It unconditionally attaches the restricted shell to any
 incoming SSH connection and waits for the user to enter commands
 through the redirected stdin stream.
 
-The only way to work-around this limitation is to make your script talk
-to the restricted shell (1-open a new SSH session, 2-wait for the
+The only way to work-around this limitation is to make your script
+talk to the restricted shell (1-open a new SSH session, 2-wait for the
 shell prompt, 3-send a command, 4-read the output until you get to the
 shell prompt again, repeat from 3). The best tool for this task is
-probably L<Expect>, used alone, as wrapped by L<Net::SSH::Expect> or
-combined with Net::OpenSSH (see L</Expect>).
+probably L<Expect>, used alone or combined with Net::OpenSSH (see
+L</Expect>).
 
 There are some devices that support command mode but that only accept
 one command per connection. In that cases, using L<Expect> is also
 probably the best option.
+
+Nowadays, there is a new player, L<Net::CLI::Interaction> that may be
+more suitable than Expect.
 
 =item Connection fails
 
@@ -4358,10 +4498,10 @@ does not list the contents of C</home/foo/bin>.
 What am I doing wrong?
 
 B<A>: Net::OpenSSH (and, for that matter, all the SSH modules
-available from CPAN but L<Net::SSH::Expect>) runs every command in a
+available from CPAN but L<Net::SSH::Expect>) run every command in a
 new session so most shell builtins that are run for its side effects
 become useless (e.g. C<cd>, C<export>, C<ulimit>, C<umask>, etc.,
-usually, you can list them running help from the shell).
+usually, you can list them running C<help> from the shell).
 
 A work around is to combine several commands in one, for instance:
 
@@ -4496,6 +4636,13 @@ execution of Perl code in remote machines through SSH.
 L<SSH::RPC|SSH::RPC> implements an RPC mechanism on top of SSH using
 Net::OpenSSH to handle the connections.
 
+L<Net::CLI::Interact> allows one to interact with remote shells
+and other services. It is specially suited for interaction with
+network equipment. The passphrase approach it uses is very clever. You
+may also like to check the L<other
+modules|https://metacpan.org/author/OLIVER> from its author, Oliver
+Gorwits.
+
 =head1 BUGS AND SUPPORT
 
 =head2 Experimental features
@@ -4584,7 +4731,7 @@ Send your feature requests, ideas or any feedback, please!
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2008-2014 by Salvador FandiE<ntilde>o
+Copyright (C) 2008-2015 by Salvador FandiE<ntilde>o
 (sfandino@yahoo.com)
 
 This library is free software; you can redistribute it and/or modify

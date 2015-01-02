@@ -4,7 +4,7 @@
       "Salvador Fandino <sfandino@yahoo.com>"
    ],
    "dynamic_config" : 1,
-   "generated_by" : "ExtUtils::MakeMaker version 6.66, CPAN::Meta::Converter version 2.120921",
+   "generated_by" : "ExtUtils::MakeMaker version 6.98, CPAN::Meta::Converter version 2.142060",
    "license" : [
       "unknown"
    ],
@@ -42,5 +42,5 @@
          "url" : "https://github.com/salva/p5-Net-OpenSSH"
       }
    },
-   "version" : "0.63_01"
+   "version" : "0.63_02"
 }
