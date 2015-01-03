@@ -1,6 +1,6 @@
 package Net::OpenSSH;
 
-our $VERSION = '0.63_02';
+our $VERSION = '0.63_03';
 
 use strict;
 use warnings;
@@ -652,9 +652,9 @@ sub _kill_master {
             local $SIG{CHLD} = sub {} unless $async;
 
             my $now = time;
-            my $start = $self->{_kill_master_start} //= $now;
-            $self->{_kill_master_last} //= $now;
-            $self->{_kill_master_count} //= 0;
+            my $start = $self->{_kill_master_start} ||= $now;
+            $self->{_kill_master_last} ||= $now;
+            $self->{_kill_master_count} ||= 0;
 
             while(1) {
                 if ($self->{_kill_master_last} < $now) {
@@ -1141,7 +1141,7 @@ sub _make_pipe {
 
 sub _remote_quoter {
     my ($self, $remote_shell) = @_;
-    if (ref $self and not defined $remote_shell) {
+    if (ref $self and (!defined $remote_shell or $remote_shell eq $self->{_remote_shell})) {
         return $self->{remote_quoter} ||= Net::OpenSSH::ShellQuoter->quoter($self->{_remote_shell});
     }
     Net::OpenSSH::ShellQuoter->quoter($remote_shell);
